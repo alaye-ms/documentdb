@@ -480,8 +480,8 @@ if [ -d "$INIT_DATA_PATH" ] && [ "$(ls -A "$INIT_DATA_PATH"/*.js 2>/dev/null)" ]
     fi
 fi
 
-# Initialize database with sample data if enabled (default behavior unless --skip-init-data is specified)
-if [ "$SKIP_INIT_DATA" != "true" ]; then
+# Initialize database with sample data if enabled and custom data was not already loaded
+if [ "$SKIP_INIT_DATA" != "true" ] && [ "$custom_data_initialized" = "false" ]; then
     echo "Initializing database with built-in sample data..."
     
     # Use the sample data directory
