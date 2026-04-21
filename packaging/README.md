@@ -66,10 +66,16 @@ Packages can be found at the `packages` directory by default, but it can be conf
 
 To build gateway packages, use the `build_gateway_packages.sh` script. This script supports the same OS and PostgreSQL version options as the main package builder.
 
-For example, to build a gateway package for Debian 12 and PostgreSQL 16, run:
+For example, to build a gateway package for Debian 12 and PostgreSQL 17, run:
 
 ```sh
-./packaging/gateway/build_gateway_packages.sh --os deb12 --pg 16
+./packaging/gateway/build_gateway_packages.sh --os deb12 --pg 17
+```
+
+To build a gateway RPM package for RHEL 9, run:
+
+```sh
+./packaging/gateway/build_gateway_packages.sh --os rhel9 --pg 17
 ```
 
 Supported DEB/Ubuntu distributions:
@@ -79,6 +85,12 @@ Supported DEB/Ubuntu distributions:
 - ubuntu22.04 — Ubuntu 22.04 (jammy)
 - ubuntu24.04 — Ubuntu 24.04 (noble)
 
+Supported RPM distributions:
+- rhel8 (Red Hat Enterprise Linux 8 compatible)
+- rhel9 (Red Hat Enterprise Linux 9 compatible)
+
 Supported PG versions: 15, 16, 17, 18
 
 The resulting gateway packages will be placed in the output directory (default: `packaging`). You can change the output location with the `--output-dir` option.
+
+Gateway runtime packages install the gateway binary, packaged configuration, systemd units, helper scripts, and sample data used by package installs. They do not choose a PostgreSQL major for you. Install `documentdb_gateway` together with the DocumentDB extension package for the PostgreSQL major you want (for example, `apt install documentdb_gateway postgresql-17-documentdb` on Debian/Ubuntu or `dnf install documentdb_gateway postgresql17-documentdb` on RHEL-family systems). If more than one PostgreSQL major is installed, pass `--pg-version` to `documentdb-setup` to pin the version you want. When `documentdb-setup` provisions a self-managed PostgreSQL cluster, it persists the cluster startup state so packaged installs restart cleanly after a reboot.

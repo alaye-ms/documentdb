@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # Cleanup function to handle container shutdown gracefully
+configFile=""
+
 cleanup() {
     echo "Shutting down DocumentDB components..."
     
@@ -23,8 +25,15 @@ cleanup() {
     exit 0
 }
 
+cleanup_temp_config() {
+    if [ -n "${configFile:-}" ] && [ -f "$configFile" ]; then
+        rm -f "$configFile"
+    fi
+}
+
 # Set up signal handlers for graceful shutdown
 trap cleanup SIGTERM SIGINT
+trap cleanup_temp_config EXIT
 
 # Function to start log streaming
 start_log_streaming() {
@@ -229,6 +238,18 @@ export INIT_DATA_PATH=${INIT_DATA_PATH:-/init_doc_db.d}
 export SKIP_INIT_DATA=${SKIP_INIT_DATA:-false}
 export DISABLE_EXTENDED_RUM=${DISABLE_EXTENDED_RUM:-false}
 
+# Resolve script and data directories.
+# Package-installed paths take priority over the legacy Docker layout.
+if [ -d "/usr/share/documentdb/scripts" ]; then
+    SCRIPT_DIR="/usr/share/documentdb/scripts"
+    SAMPLE_DATA_DIR="/usr/share/documentdb/sample-data"
+    CONFIG_DIR="/etc/documentdb"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    SAMPLE_DATA_DIR="$(dirname "$SCRIPT_DIR")/sample-data"
+    CONFIG_DIR="$(dirname "$SCRIPT_DIR")/pg_documentdb_gw"
+fi
+
 # Setup centralized log directory structure
 echo "Setting up centralized log directory at /var/log/documentdb..."
 sudo mkdir -p /var/log/documentdb/postgres
@@ -343,7 +364,7 @@ if [ "$START_POSTGRESQL" = "true" ]; then
     fi
     start_oss_server_args+=(-d "$DATA_PATH" -p "$POSTGRESQL_PORT")
 
-    /home/documentdb/gateway/scripts/start_oss_server.sh "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
+    "$SCRIPT_DIR/start_oss_server.sh" "${start_oss_server_args[@]}" | tee -a "$OSS_SERVER_LOG"
 
     echo "OSS server started."
     echo "[ENTRYPOINT] Setting up PostgreSQL log streaming..."
@@ -405,37 +426,36 @@ else
 fi
 
 # Setting up the configuration file
-mkdir -p /home/documentdb/gateway/pg_documentdb_gw/target
-configFile="/home/documentdb/gateway/pg_documentdb_gw/target/SetupConfiguration_temp.json"
-cp /home/documentdb/gateway/pg_documentdb_gw/SetupConfiguration.json $configFile
-sudo chmod 755 $configFile
+configFile=$(mktemp /tmp/SetupConfiguration_XXXXXX.json)
+cp "$CONFIG_DIR/SetupConfiguration.json" "$configFile"
+chmod 600 "$configFile"
 
 if [ -n "${DOCUMENTDB_PORT:-}" ]; then
     echo "Updating GatewayListenPort in the configuration file..."
-    jq ".GatewayListenPort = $DOCUMENTDB_PORT" $configFile > $configFile.tmp && \
-    mv $configFile.tmp $configFile
+    jq ".GatewayListenPort = $DOCUMENTDB_PORT" "$configFile" > "$configFile.tmp" && \
+    mv "$configFile.tmp" "$configFile"
 fi
 
 if [ -n "${POSTGRESQL_PORT:-}" ]; then
     echo "Updating PostgresPort in the configuration file..."
-    jq ".PostgresPort = $POSTGRESQL_PORT" $configFile > $configFile.tmp && \
-    mv $configFile.tmp $configFile
+    jq ".PostgresPort = $POSTGRESQL_PORT" "$configFile" > "$configFile.tmp" && \
+    mv "$configFile.tmp" "$configFile"
 fi
 
 if [ -n "${CERT_PATH:-}" ] && [ -n "${KEY_FILE:-}" ]; then
     echo "Adding CertificateOptions to the configuration file..."
     jq --arg certPath "$CERT_PATH" --arg keyFilePath "$KEY_FILE" \
        '.CertificateOptions = { "CertType": "PemFile", "FilePath": $certPath, "KeyFilePath": $keyFilePath }' \
-       $configFile > $configFile.tmp && \
-    mv $configFile.tmp $configFile
+       "$configFile" > "$configFile.tmp" && \
+    mv "$configFile.tmp" "$configFile"
 fi
 
 echo "Starting gateway in the background..."
 if [ "$CREATE_USER" = "false" ]; then
     echo "Skipping user creation and starting the gateway..."
-    /home/documentdb/gateway/scripts/build_and_start_gateway.sh -s -d $configFile -P $POSTGRESQL_PORT -o $OWNER | tee -a "$GATEWAY_LOG" &
+    "$SCRIPT_DIR/build_and_start_gateway.sh" -s -d "$configFile" -P "$POSTGRESQL_PORT" -o "$OWNER" | tee -a "$GATEWAY_LOG" &
 else
-    /home/documentdb/gateway/scripts/build_and_start_gateway.sh -u $USERNAME -p $PASSWORD -d $configFile -P $POSTGRESQL_PORT -o $OWNER | tee -a "$GATEWAY_LOG" &
+    "$SCRIPT_DIR/build_and_start_gateway.sh" -u "$USERNAME" -p "$PASSWORD" -d "$configFile" -P "$POSTGRESQL_PORT" -o "$OWNER" | tee -a "$GATEWAY_LOG" &
 fi
 
 gateway_pid=$! # Capture the PID of the gateway process
@@ -465,7 +485,7 @@ if [ -d "$INIT_DATA_PATH" ] && [ "$(ls -A "$INIT_DATA_PATH"/*.js 2>/dev/null)" ]
     echo "Initializing database with custom data from: $INIT_DATA_PATH"
     
     # Use the dedicated initialization script
-    init_script="/home/documentdb/gateway/scripts/init_documentdb_data.sh"
+    init_script="$SCRIPT_DIR/init_documentdb_data.sh"
     if [ -f "$init_script" ]; then
         echo "Using custom initialization data from: $INIT_DATA_PATH"
         if "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -p "$PASSWORD" -d "$INIT_DATA_PATH" -v; then
@@ -480,13 +500,13 @@ if [ -d "$INIT_DATA_PATH" ] && [ "$(ls -A "$INIT_DATA_PATH"/*.js 2>/dev/null)" ]
     fi
 fi
 
-# Initialize database with sample data if enabled and custom data was not already loaded
-if [ "$SKIP_INIT_DATA" != "true" ] && [ "$custom_data_initialized" = "false" ]; then
+# Initialize database with sample data if enabled (default behavior unless --skip-init-data is specified)
+if [ "$SKIP_INIT_DATA" != "true" ]; then
     echo "Initializing database with built-in sample data..."
     
     # Use the sample data directory
-    sample_data_path="/home/documentdb/gateway/sample-data"
-    init_script="/home/documentdb/gateway/scripts/init_documentdb_data.sh"
+    sample_data_path="$SAMPLE_DATA_DIR"
+    init_script="$SCRIPT_DIR/init_documentdb_data.sh"
     
     if [ -f "$init_script" ] && [ -d "$sample_data_path" ]; then
         echo "Loading sample data from: $sample_data_path"

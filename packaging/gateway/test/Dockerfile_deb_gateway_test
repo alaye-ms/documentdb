@@ -8,12 +8,14 @@ ARG DEB_PACKAGE_REL_PATH
 ARG GATEWAY_PACKAGE_PATH
 # Fail fast if caller did not pass the required deb path build arg.
 RUN [ -n "${DEB_PACKAGE_REL_PATH}" ] || (echo "ERROR: DEB_PACKAGE_REL_PATH build-arg is required. Example: --build-arg DEB_PACKAGE_REL_PATH=packaging/packages/ubuntu22.04-postgresql-16-documentdb_1.0.0_amd64.deb" >&2; exit 1)
+RUN [ -n "${GATEWAY_PACKAGE_PATH}" ] || (echo "ERROR: GATEWAY_PACKAGE_PATH build-arg is required. Example: --build-arg GATEWAY_PACKAGE_PATH=packaging/deb12-documentdb_gateway_1.0.0_amd64.deb" >&2; exit 1)
 
 # Base tools + locale (single layer)
 RUN apt-get update; \
     apt-get install -y --no-install-recommends \
         wget \
         gnupg2 \
+        jq \
         lsb-release \
         ca-certificates \
         locales \
@@ -25,29 +27,23 @@ RUN apt-get update; \
 # Minimal locale env (others inherit)
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# Add PostgreSQL upstream repo (modern keyring usage) + install extensions
+# Add PostgreSQL upstream repo so apt can resolve local package dependencies.
 RUN install -d -m 0755 /etc/apt/keyrings; \
     wget -qO /etc/apt/keyrings/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
     echo "deb [signed-by=/etc/apt/keyrings/pgdg.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main ${POSTGRES_VERSION}" \
         > /etc/apt/sources.list.d/pgdg.list; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        postgresql-${POSTGRES_VERSION} \
-        postgresql-${POSTGRES_VERSION}-cron \
-        postgresql-${POSTGRES_VERSION}-pgvector \
-        postgresql-${POSTGRES_VERSION}-postgis-3 \
-        postgresql-${POSTGRES_VERSION}-rum \
-    ; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get update
 
 RUN mkdir -p /tmp/install_setup
 COPY ${DEB_PACKAGE_REL_PATH} /tmp/install_setup/
-RUN dpkg -i /tmp/install_setup/$(basename "$DEB_PACKAGE_REL_PATH")
-
 COPY ${GATEWAY_PACKAGE_PATH} /tmp/install_setup/
-RUN dpkg -i /tmp/install_setup/$(basename "$GATEWAY_PACKAGE_PATH")
+RUN apt-get install -y --no-install-recommends \
+    /tmp/install_setup/$(basename "$DEB_PACKAGE_REL_PATH") \
+    /tmp/install_setup/$(basename "$GATEWAY_PACKAGE_PATH") && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN useradd -ms /bin/bash documentdb -G sudo
+RUN usermod -a -G sudo documentdb
+RUN mkdir -p /home/documentdb && chown documentdb:documentdb /home/documentdb
 RUN echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers.d/no-pass-ask
 
 # ----------- Final Gateway Image -----------
@@ -57,7 +53,20 @@ ARG POSTGRES_VERSION
 RUN sudo groupmod -g 103 postgres && sudo usermod -u 105 -g 103 postgres
 RUN sudo apt-get update && \
     sudo apt-get install -y --no-install-recommends \
-    jq openssl lsof libc6 python3-venv netcat-openbsd && \
+        jq openssl lsof libc6 wget gnupg netcat-openbsd iproute2 procps && \
+    . /etc/os-release && \
+    wget -qO- https://www.mongodb.org/static/pgp/server-8.0.asc | sudo tee /etc/apt/trusted.gpg.d/server-8.0.asc >/dev/null && \
+    if [ "$ID" = "ubuntu" ]; then \
+        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu ${VERSION_CODENAME}/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list; \
+    else \
+        MONGOSH_CODENAME="$VERSION_CODENAME"; \
+        if [ "$MONGOSH_CODENAME" = "trixie" ] || [ "$MONGOSH_CODENAME" = "bullseye" ]; then \
+            MONGOSH_CODENAME="bookworm"; \
+        fi; \
+        echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/debian ${MONGOSH_CODENAME}/mongodb-org/8.0 main" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list; \
+    fi && \
+    sudo apt-get update && \
+    sudo apt-get install -y --no-install-recommends mongodb-mongosh && \
     sudo rm -rf /var/lib/apt/lists/*
 
 ENV LANGUAGE=en_US.UTF-8 \
@@ -78,26 +87,15 @@ ENV CERT_PATH="" \
     ALLOW_EXTERNAL_CONNECTIONS="false" \
     PATH=/usr/lib/postgresql/${POSTGRES_VERSION}/bin:$PATH
 
-RUN sudo mkdir /home/documentdb/gateway
-RUN sudo mkdir -p /home/documentdb/gateway/pg_documentdb_gw/target/release-with-symbols
-RUN  ln -s /usr/bin/documentdb_gateway /home/documentdb/gateway/pg_documentdb_gw/target/release-with-symbols/documentdb_gateway  
-
 # Create /var/run/postgresql directory with proper permissions
 RUN sudo mkdir -p /var/run/postgresql && \
     sudo chown -R documentdb:documentdb /var/run/postgresql && \
     sudo chmod 755 /var/run/postgresql
 
-COPY pg_documentdb_gw/SetupConfiguration.json /home/documentdb/gateway/pg_documentdb_gw/SetupConfiguration.json
-COPY scripts/start_oss_server.sh /home/documentdb/gateway/scripts/start_oss_server.sh
-COPY scripts/build_and_start_gateway.sh /home/documentdb/gateway/scripts/build_and_start_gateway.sh
-COPY documentdb-local/scripts/emulator_entrypoint.sh /home/documentdb/gateway/scripts/emulator_entrypoint.sh
-COPY scripts/utils.sh /home/documentdb/gateway/scripts/utils.sh
-COPY scripts/setup_psqlrc.sh /home/documentdb/gateway/scripts/setup_psqlrc.sh
-COPY packaging/test_packages/test_gateway.py /home/documentdb/gateway/scripts/test_gateway.py
-COPY packaging/test_packages/test-gateway-install-entrypoint.sh /home/documentdb/gateway/scripts/test-gateway-install-entrypoint.sh
+COPY packaging/test_packages/test-gateway-install-entrypoint.sh /usr/share/documentdb/scripts/test-gateway-install-entrypoint.sh
+RUN chmod +x /usr/share/documentdb/scripts/test-gateway-install-entrypoint.sh
 
 USER documentdb
-RUN sudo chown -R documentdb:documentdb /home/documentdb/gateway
 
-WORKDIR /home/documentdb/gateway/scripts
-ENTRYPOINT ["/bin/bash", "-c", "/home/documentdb/gateway/scripts/test-gateway-install-entrypoint.sh"]
+WORKDIR /usr/share/documentdb/scripts
+ENTRYPOINT ["/bin/bash", "-c", "/usr/share/documentdb/scripts/test-gateway-install-entrypoint.sh"]

@@ -67,16 +67,27 @@ jobs:
       run: |
         ./packaging/build_packages.sh --os deb13 --pg ${{ matrix.pg_version }} --output-dir downloaded-artifacts
         ls -R downloaded-artifacts
+    - name: Build Gateway DEB
+      run: |
+        ./packaging/build_gateway_packages.sh --os deb13 --pg 17 --output-dir downloaded-artifacts
+        ls -R downloaded-artifacts
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
     - name: Build ${{ matrix.arch }} Image
       run: |
         TAG=${{ env.IMAGE_TAG }}-pg${{ matrix.pg_version }}-${{ matrix.arch }}
+        mapfile -t EXT_DEBS < <(find downloaded-artifacts -maxdepth 1 -type f -name 'deb13-postgresql-*-documentdb_*.deb' ! -name '*dbgsym*' | sort)
+        mapfile -t GW_DEBS < <(find downloaded-artifacts -maxdepth 1 -type f -name '*-documentdb_gateway_*.deb' | sort)
+        [ "${#EXT_DEBS[@]}" -eq 1 ] || { echo 'Expected exactly one extension DEB artifact'; exit 1; }
+        [ "${#GW_DEBS[@]}" -eq 1 ] || { echo 'Expected exactly one gateway DEB artifact'; exit 1; }
+        EXT_DEB=$(basename "${EXT_DEBS[0]}")
+        GW_DEB=$(basename "${GW_DEBS[0]}")
         docker build \
           --platform linux/${{ matrix.arch }} \
           --build-arg BASE_IMAGE=debian:trixie-slim \
           --build-arg POSTGRES_VERSION=${{ matrix.pg_version }} \
-          --build-arg DEB_PACKAGE_REL_PATH=downloaded-artifacts/$(ls downloaded-artifacts | grep -v 'dbgsym')  \
+          --build-arg DEB_PACKAGE_REL_PATH=downloaded-artifacts/$EXT_DEB \
+          --build-arg GATEWAY_PACKAGE_PATH=downloaded-artifacts/$GW_DEB \
           -t ghcr.io/${{ github.repository }}/${{ env.IMAGE_NAME }}:$TAG \
           -f packaging/gateway/docker/Dockerfile_documentdb_local .
     - name: Push ${{ matrix.arch }} Image
@@ -100,8 +111,6 @@ jobs:
     steps:
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-    - name: Show version
-      run: echo "Using DOCUMENTDB_VERSION=${{ needs.prepare.outputs.documentdb_version }}"
     - name: Set Default Values
       run: |
         echo "MANIFEST_TAG=pg${{ matrix.pg_version }}-${{ needs.build-and-push.outputs.documentdb_version }}" >> $GITHUB_ENV

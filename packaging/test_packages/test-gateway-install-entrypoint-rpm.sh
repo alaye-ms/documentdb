@@ -6,52 +6,160 @@ readonly PASSWORD="DocDbPasswordArgCheck123"
 readonly PG_PORT="9712"
 readonly GATEWAY_PORT="10260"
 readonly SETUP_LOG="/tmp/documentdb-setup.log"
-readonly LSOF_PATH="$(command -v lsof || true)"
-LSOF_BACKUP_PATH=""
 TEMP_FILES=()
 
 log() {
-    echo "[gateway-package-e2e] $*"
+    echo "[gateway-rpm-e2e] $*"
+}
+
+fail() {
+    echo "[gateway-rpm-e2e] ERROR: $*" >&2
+    exit 1
 }
 
 cleanup() {
     if (( ${#TEMP_FILES[@]} > 0 )); then
-        rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+        rm -rf "${TEMP_FILES[@]}" 2>/dev/null || true
         TEMP_FILES=()
-    fi
-    if [[ -n "${LSOF_BACKUP_PATH}" && -e "${LSOF_BACKUP_PATH}" ]]; then
-        sudo mv "${LSOF_BACKUP_PATH}" "${LSOF_PATH}"
     fi
 }
 trap cleanup EXIT
 
-fail() {
-    echo "[gateway-package-e2e] ERROR: $*" >&2
-    exit 1
-}
-
-assert_not_exists() {
-    local path="$1"
-    if [[ -e "${path}" ]]; then
-        fail "Expected ${path} to be absent"
+assert_eq() {
+    local actual="$1"
+    local expected="$2"
+    local message="$3"
+    if [[ "${actual}" != "${expected}" ]]; then
+        fail "${message}: expected '${expected}', got '${actual}'"
     fi
 }
 
-disable_lsof() {
-    if [[ -z "${LSOF_PATH}" ]]; then
+assert_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local message="$3"
+    if [[ "${haystack}" != *"${needle}"* ]]; then
+        fail "${message}: missing '${needle}' in '${haystack}'"
+    fi
+}
+
+assert_not_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local message="$3"
+    if [[ "${haystack}" == *"${needle}"* ]]; then
+        fail "${message}: unexpectedly found '${needle}' in '${haystack}'"
+    fi
+}
+
+assert_file() {
+    local path="$1"
+    if [[ ! -e "${path}" ]]; then
+        fail "Expected file ${path} to exist"
+    fi
+}
+
+assert_executable() {
+    local path="$1"
+    if [[ ! -x "${path}" ]]; then
+        fail "Expected executable ${path} to exist"
+    fi
+}
+
+assert_file_contains_regex() {
+    local path="$1"
+    local regex="$2"
+    local message="$3"
+    if [[ -r "${path}" ]]; then
+        grep -Eq "${regex}" "${path}" || fail "${message}: ${path} did not match ${regex}"
         return 0
     fi
 
-    command -v ss >/dev/null 2>&1 || fail "ss is required to exercise the listener fallback path"
-    LSOF_BACKUP_PATH="${LSOF_PATH}.documentdb-disabled"
-    sudo mv "${LSOF_PATH}" "${LSOF_BACKUP_PATH}"
+    if command -v sudo >/dev/null 2>&1; then
+        sudo grep -Eq "${regex}" "${path}" || fail "${message}: ${path} did not match ${regex}"
+        return 0
+    fi
+
+    if ! grep -Eq "${regex}" "${path}" 2>/dev/null; then
+        fail "${message}: ${path} did not match ${regex}"
+    fi
 }
 
-restore_lsof() {
-    if [[ -n "${LSOF_BACKUP_PATH}" && -e "${LSOF_BACKUP_PATH}" ]]; then
-        sudo mv "${LSOF_BACKUP_PATH}" "${LSOF_PATH}"
-        LSOF_BACKUP_PATH=""
+register_temp_file() {
+    TEMP_FILES+=("$1")
+}
+
+create_temp_dir() {
+    local target_var="$1"
+    local template="${2:-/tmp/documentdb-tempdir.XXXXXX}"
+    local created_dir=""
+
+    created_dir="$(mktemp -d "${template}")"
+    chmod 700 "${created_dir}"
+    register_temp_file "${created_dir}"
+    printf -v "${target_var}" '%s' "${created_dir}"
+}
+
+create_temp_file() {
+    local target_var="$1"
+    local template="${2:-}"
+    local created_file=""
+
+    if [[ -n "${template}" ]]; then
+        created_file="$(mktemp "${template}")"
+    else
+        created_file="$(mktemp)"
     fi
+
+    chmod 600 "${created_file}"
+    register_temp_file "${created_file}"
+    printf -v "${target_var}" '%s' "${created_file}"
+}
+
+extract_rpm_scriptlet() {
+    local target_var="$1"
+    local scriptlet_name="$2"
+    local package_path="$3"
+    local scriptlet_file=""
+
+    create_temp_file scriptlet_file "/tmp/documentdb-rpm-scriptlet.XXXXXX"
+    rpm -qp --scripts "${package_path}" | awk -v section="${scriptlet_name}" '
+        $0 == section " scriptlet (using /bin/sh):" { capture = 1; next }
+        capture && /^[[:alpha:]][[:alpha:]-]* scriptlet \(using .*\):$/ { exit }
+        capture { print }
+    ' > "${scriptlet_file}"
+
+    [[ -s "${scriptlet_file}" ]] || fail "Failed to extract ${scriptlet_name} from ${package_path}"
+    printf -v "${target_var}" '%s' "${scriptlet_file}"
+}
+
+run_scriptlet_with_fake_systemctl() {
+    local scriptlet_file="$1"
+    local scriptlet_arg="$2"
+    local systemctl_log="$3"
+    local fakebin_dir=""
+
+    create_temp_dir fakebin_dir "/tmp/documentdb-fakebin.XXXXXX"
+    cat > "${fakebin_dir}/systemctl" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "${FAKE_SYSTEMCTL_LOG}"
+EOF
+    chmod 755 "${fakebin_dir}/systemctl"
+
+    : > "${systemctl_log}"
+    env FAKE_SYSTEMCTL_LOG="${systemctl_log}" PATH="${fakebin_dir}:${PATH}" \
+        bash "${scriptlet_file}" "${scriptlet_arg}"
+}
+
+run_psql() {
+    local sql="$1"
+    psql \
+        -h localhost \
+        -p "${PG_PORT}" \
+        -U documentdb \
+        -d postgres \
+        -X \
+        -Atqc "${sql}"
 }
 
 password_visible_in_process_args() {
@@ -92,32 +200,6 @@ password_visible_in_process_args() {
     done
 
     return 1
-}
-
-run_psql() {
-    local sql="$1"
-    psql         -h localhost         -p "${PG_PORT}"         -U documentdb         -d postgres         -X         -Atqc "${sql}"
-}
-
-register_temp_file() {
-    TEMP_FILES+=("$1")
-}
-
-create_temp_file() {
-    local target_var="$1"
-    local template="${2:-}"
-    local created_file=""
-    local -n target_ref="${target_var}"
-
-    if [[ -n "${template}" ]]; then
-        created_file="$(mktemp "${template}")"
-    else
-        created_file="$(mktemp)"
-    fi
-
-    chmod 600 "${created_file}"
-    register_temp_file "${created_file}"
-    target_ref="${created_file}"
 }
 
 create_mongosh_wrapper_script() {
@@ -162,65 +244,24 @@ run_mongosh_script() {
         mongosh --quiet --nodb "${wrapper_file}" > "${output_file}" 2>&1
 }
 
-assert_eq() {
-    local actual="$1"
-    local expected="$2"
-    local message="$3"
-    if [[ "${actual}" != "${expected}" ]]; then
-        fail "${message}: expected '${expected}', got '${actual}'"
-    fi
-}
-
-assert_contains() {
-    local haystack="$1"
-    local needle="$2"
-    local message="$3"
-    if [[ "${haystack}" != *"${needle}"* ]]; then
-        fail "${message}: missing '${needle}' in '${haystack}'"
-    fi
-}
-
-assert_file() {
-    local path="$1"
-    if [[ ! -e "${path}" ]]; then
-        fail "Expected file ${path} to exist"
-    fi
-}
-
-assert_executable() {
-    local path="$1"
-    if [[ ! -x "${path}" ]]; then
-        fail "Expected executable ${path} to exist"
-    fi
-}
-
-assert_file_contains_regex() {
-    local path="$1"
-    local regex="$2"
-    local message="$3"
-    if [[ -r "${path}" ]]; then
-        grep -Eq "${regex}" "${path}" || fail "${message}: ${path} did not match ${regex}"
-        return 0
-    fi
-
-    if command -v sudo >/dev/null 2>&1; then
-        sudo grep -Eq "${regex}" "${path}" || fail "${message}: ${path} did not match ${regex}"
-        return 0
-    fi
-
-    if ! grep -Eq "${regex}" "${path}" 2>/dev/null; then
-        fail "${message}: ${path} did not match ${regex}"
-    fi
-}
-
-verify_package_contents() {
+verify_package_install() {
+    local extension_package_name=""
+    local gateway_requires=""
     local setup_help=""
 
-    log "Verifying packaged assets are installed."
-    assert_executable /usr/bin/documentdb-setup
+    log "Installing extension and gateway RPM packages."
+    extension_package_name="$(rpm -qp --queryformat "%{NAME}\n" /tmp/documentdb.rpm)"
+    dnf install -y /tmp/documentdb.rpm /tmp/documentdb_gateway.rpm
+
+    rpm -q "${extension_package_name}" >/dev/null 2>&1 || fail "Extension RPM was not installed successfully"
+    rpm -q documentdb_gateway >/dev/null 2>&1 || fail "Gateway RPM was not installed successfully"
+    command -v jq >/dev/null 2>&1 || fail "Gateway RPM dependency jq was not installed"
+
     assert_executable /usr/bin/documentdb_gateway
+    assert_executable /usr/bin/documentdb-setup
     assert_file /etc/documentdb/SetupConfiguration.json
     assert_file /lib/systemd/system/documentdb-postgresql.service
+    assert_file /lib/systemd/system/documentdb-gateway.service
     assert_file /usr/share/documentdb/scripts/start_oss_server.sh
     assert_file /usr/share/documentdb/scripts/build_and_start_gateway.sh
     assert_executable /usr/share/documentdb/scripts/documentdb_postgresql_service.sh
@@ -228,22 +269,45 @@ verify_package_contents() {
     assert_file /usr/share/documentdb/scripts/init_documentdb_data.sh
     assert_file /usr/share/documentdb/sample-data/01-users.js
 
+    id documentdb >/dev/null 2>&1 || fail "documentdb runtime user was not created"
+    [[ -d /var/lib/documentdb ]] || fail "/var/lib/documentdb was not created"
+    [[ "$(stat -c "%U:%G" /var/lib/documentdb)" == "documentdb:documentdb" ]] || fail "/var/lib/documentdb is not owned by documentdb"
+
+    gateway_requires="$(rpm -qpR /tmp/documentdb_gateway.rpm)"
+    assert_contains "${gateway_requires}" "jq" "Gateway RPM metadata is missing the jq dependency"
+    if printf "%s\n" "${gateway_requires}" | grep -Eq "postgresql(15|16|17|18)-documentdb"; then
+        fail "Gateway RPM metadata should not auto-select a DocumentDB extension package"
+    fi
+
     setup_help="$(documentdb-setup --help)"
-    printf '%s\n' "${setup_help}" | grep -Fq -- '--password-file <FILE>' \
+    printf "%s\n" "${setup_help}" | grep -Fq -- '--password-file <FILE>' \
         || fail "documentdb-setup help did not advertise --password-file"
-    printf '%s\n' "${setup_help}" | grep -Fq -- 'localhost HBA entries while preserving its SSL setting' \
+    printf "%s\n" "${setup_help}" | grep -Fq -- 'localhost HBA entries while preserving its SSL setting' \
         || fail "documentdb-setup help did not explain the --skip-pg-init managed config changes"
 }
 
-verify_package_dependencies() {
-    local gateway_depends
+verify_preun_scriptlet_behaviour() {
+    local preun_scriptlet=""
+    local systemctl_log=""
+    local systemctl_calls=""
 
-    log "Verifying gateway package metadata leaves PostgreSQL-major selection to the user."
-    gateway_depends="$(dpkg-query -W -f='${Depends}\n' documentdb_gateway)"
-    assert_contains "${gateway_depends}" "jq" "Gateway package metadata is missing the jq dependency"
-    if printf '%s\n' "${gateway_depends}" | grep -Eq 'postgresql-[0-9]+-documentdb'; then
-        fail "Gateway package metadata should not auto-select a DocumentDB extension package: ${gateway_depends}"
-    fi
+    log "Verifying RPM %preun stops services on upgrade and disables them only on removal."
+    extract_rpm_scriptlet preun_scriptlet "preuninstall" /tmp/documentdb_gateway.rpm
+    create_temp_file systemctl_log "/tmp/documentdb-rpm-preun.XXXXXX.log"
+
+    run_scriptlet_with_fake_systemctl "${preun_scriptlet}" 1 "${systemctl_log}"
+    systemctl_calls="$(< "${systemctl_log}")"
+    assert_contains "${systemctl_calls}" "stop documentdb-postgresql" "Upgrade %preun did not stop documentdb-postgresql"
+    assert_contains "${systemctl_calls}" "stop documentdb-gateway" "Upgrade %preun did not stop documentdb-gateway"
+    assert_not_contains "${systemctl_calls}" "disable documentdb-postgresql" "Upgrade %preun should not disable documentdb-postgresql"
+    assert_not_contains "${systemctl_calls}" "disable documentdb-gateway" "Upgrade %preun should not disable documentdb-gateway"
+
+    run_scriptlet_with_fake_systemctl "${preun_scriptlet}" 0 "${systemctl_log}"
+    systemctl_calls="$(< "${systemctl_log}")"
+    assert_contains "${systemctl_calls}" "stop documentdb-postgresql" "Removal %preun did not stop documentdb-postgresql"
+    assert_contains "${systemctl_calls}" "stop documentdb-gateway" "Removal %preun did not stop documentdb-gateway"
+    assert_contains "${systemctl_calls}" "disable documentdb-postgresql" "Removal %preun did not disable documentdb-postgresql"
+    assert_contains "${systemctl_calls}" "disable documentdb-gateway" "Removal %preun did not disable documentdb-gateway"
 }
 
 run_documentdb_setup() {
@@ -255,9 +319,8 @@ run_documentdb_setup() {
     printf '%s' "${PASSWORD}" > "${password_file}"
 
     log "Running packaged documentdb-setup."
-    disable_lsof
 
-    sudo documentdb-setup --username "${USERNAME}" --password-file "${password_file}" --verbose "${setup_args[@]}" > "${SETUP_LOG}" 2>&1 &
+    documentdb-setup --username "${USERNAME}" --password-file "${password_file}" --verbose "${setup_args[@]}" > "${SETUP_LOG}" 2>&1 &
     setup_pid=$!
     while kill -0 "${setup_pid}" 2>/dev/null; do
         if password_visible_in_process_args "${setup_pid}"; then
@@ -266,7 +329,6 @@ run_documentdb_setup() {
         fi
         sleep 0.1
     done
-    restore_lsof
 
     if ! wait "${setup_pid}"; then
         cat "${SETUP_LOG}"
@@ -395,30 +457,9 @@ EOF
     cat "${sample_log}"
 }
 
-verify_package_purge_cleanup() {
-    local purge_log=""
-
-    create_temp_file purge_log "/tmp/documentdb-gateway-purge.XXXXXX.log"
-
-    log "Verifying purge removes packaged configuration state."
-    if ! sudo dpkg --purge documentdb_gateway > "${purge_log}" 2>&1; then
-        cat "${purge_log}"
-        fail "Purging documentdb_gateway failed"
-    fi
-    cat "${purge_log}"
-
-    if dpkg-query -W documentdb_gateway >/dev/null 2>&1; then
-        fail "documentdb_gateway still appears installed after purge"
-    fi
-
-    assert_not_exists /etc/documentdb/SetupConfiguration.json
-    assert_not_exists /etc/documentdb/documentdb-postgresql.env
-    assert_not_exists /etc/documentdb
-}
-
 main() {
-    verify_package_contents
-    verify_package_dependencies
+    verify_preun_scriptlet_behaviour
+    verify_package_install
     run_documentdb_setup
     verify_gateway_configuration
     verify_self_managed_postgres_persistence
@@ -426,8 +467,7 @@ main() {
     verify_gateway_crud
     run_documentdb_setup --load-sample-data
     verify_sample_data
-    verify_package_purge_cleanup
-    log "Gateway package clean-install E2E passed."
+    log "Gateway RPM clean-install E2E passed."
 }
 
 main "$@"

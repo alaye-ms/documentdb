@@ -1,8 +1,10 @@
 # Define the base image dynamically
 ARG BASE_IMAGE=rust:slim-bookworm
 FROM ${BASE_IMAGE}
-ARG BASE_IMAGE  
+ARG BASE_IMAGE
+ARG DOCUMENTDB_VERSION
 ARG DEBIAN_FRONTEND=noninteractive
+ENV DOCUMENTDB_VERSION=${DOCUMENTDB_VERSION}
 
 RUN apt-get update; \
     apt-get install -y --no-install-recommends jq curl sudo git make wget build-essential openssl pkg-config libssl-dev ca-certificates lsb-release gnupg2; \
@@ -24,12 +26,11 @@ WORKDIR /home/documentdb/code
 
 COPY . /home/documentdb/code
 
+RUN sudo chown -R documentdb:documentdb /home/documentdb/code
 RUN sudo chmod +x /home/documentdb/code/scripts/*.sh
 RUN /home/documentdb/code/scripts/install_llvm.sh
 
 RUN cargo install cargo-deb
-
-RUN sudo chown -R documentdb:documentdb /home/documentdb/code
 
 WORKDIR /home/documentdb/code/pg_documentdb_gw
 
@@ -40,4 +41,4 @@ USER root
 RUN mkdir -p /output && chown documentdb:documentdb /output
 USER documentdb
 
-CMD ["cargo", "deb", "--no-build", "--profile=release-with-symbols", "--output", "/output/"]
+CMD ["/bin/bash", "-c", "set -euo pipefail && test -n \"$OS\" || (echo \"OS not set\" && false) && cargo deb --no-build --profile=release-with-symbols --deb-version \"$DOCUMENTDB_VERSION\" --output /output/ && cd /output && shopt -s nullglob && for f in documentdb_gateway_*.deb; do mv \"$f\" \"$OS-$f\"; done"]

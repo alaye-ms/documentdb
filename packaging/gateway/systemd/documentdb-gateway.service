@@ -1,0 +1,17 @@
+[Unit]
+Description=DocumentDB Gateway
+After=network.target documentdb-postgresql.service
+Wants=documentdb-postgresql.service
+
+[Service]
+Type=simple
+User=documentdb
+Group=documentdb
+WorkingDirectory=/var/lib/documentdb
+ExecStart=/usr/bin/documentdb_gateway /etc/documentdb/SetupConfiguration.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
