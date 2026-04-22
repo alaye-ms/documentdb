@@ -82,12 +82,10 @@ jobs:
       - name: Build Gateway Debian Package
         # Just to avoid building gateway packages twice for pg version.
         # keep pg version when building gateway in case we need it for gateway build process in the future.
-        if: matrix.pg_version == '17'
         run: |
-          ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg 17 --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
+          ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
 
       - name: Upload Gateway Debian Package as Artifact
-        if: matrix.pg_version == '17'
         uses: actions/upload-artifact@v4
         with:
           name: archive-${{ matrix.os }}-${{ matrix.arch }}-documentdb-gateway-${{ env.DOCUMENTDB_VERSION }}
