@@ -15,7 +15,6 @@ DOCUMENTDB_HOST="localhost"
 DOCUMENTDB_PORT="10260"
 LOG_FILE="${ENTRYPOINT_LOG:-/var/log/documentdb/gateway_entrypoint.log}"
 LOG_FILE_AVAILABLE="false"
-TEMP_FILES=()
 
 if [ -n "$LOG_FILE" ]; then
     if touch "$LOG_FILE" 2>/dev/null; then
@@ -24,36 +23,6 @@ if [ -n "$LOG_FILE" ]; then
         echo "Warning: Unable to append to log file: $LOG_FILE"
     fi
 fi
-
-cleanup_temp_files() {
-    if [ "${#TEMP_FILES[@]}" -eq 0 ]; then
-        return 0
-    fi
-
-    rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
-    TEMP_FILES=()
-}
-trap cleanup_temp_files EXIT
-
-register_temp_file() {
-    TEMP_FILES+=("$1")
-}
-
-create_temp_file() {
-    local target_var="$1"
-    local template="${2:-}"
-    local created_file=""
-
-    if [ -n "$template" ]; then
-        created_file="$(mktemp "$template")"
-    else
-        created_file="$(mktemp)"
-    fi
-
-    chmod 600 "$created_file"
-    register_temp_file "$created_file"
-    printf -v "$target_var" '%s' "$created_file"
-}
 
 # Print usage information
 usage() {
@@ -133,40 +102,33 @@ resolve_password() {
     fi
 }
 
-create_mongosh_wrapper_script() {
-    local target_var="$1"
-    local wrapper_path=""
-
-    create_temp_file wrapper_path "/tmp/documentdb-mongosh.XXXXXX.js"
-    cat > "$wrapper_path" <<'EOF'
-const host = process.env.DOCUMENTDB_HOST || 'localhost';
-const port = process.env.DOCUMENTDB_PORT;
-const username = process.env.DOCUMENTDB_USERNAME;
-const password = process.env.DOCUMENTDB_PASSWORD;
-const initFile = process.env.DOCUMENTDB_INIT_FILE || '';
-const uri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}/admin?authSource=admin&authMechanism=SCRAM-SHA-256&tls=true&tlsAllowInvalidCertificates=true`;
-
-db = connect(uri);
-
-if (initFile) {
-    load(initFile);
-}
-EOF
-
-    printf -v "$target_var" '%s' "$wrapper_path"
-}
-
 run_mongosh_script() {
-    local init_file="$1"
-    local wrapper_file=""
+    local init_file="${1:-}"
+    local init_mode="${2:-load}"
 
-    create_mongosh_wrapper_script wrapper_file
     DOCUMENTDB_HOST="$DOCUMENTDB_HOST" \
     DOCUMENTDB_PORT="$DOCUMENTDB_PORT" \
     DOCUMENTDB_USERNAME="$USERNAME" \
     DOCUMENTDB_PASSWORD="$PASSWORD" \
     DOCUMENTDB_INIT_FILE="$init_file" \
-        mongosh --quiet --nodb "$wrapper_file"
+    DOCUMENTDB_INIT_MODE="$init_mode" \
+        mongosh --quiet --nodb <<'EOF'
+const host = process.env.DOCUMENTDB_HOST || 'localhost';
+const port = process.env.DOCUMENTDB_PORT;
+const username = process.env.DOCUMENTDB_USERNAME;
+const password = process.env.DOCUMENTDB_PASSWORD;
+const initFile = process.env.DOCUMENTDB_INIT_FILE || '';
+const initMode = process.env.DOCUMENTDB_INIT_MODE || 'load';
+const uri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}/admin?authSource=admin&authMechanism=SCRAM-SHA-256&tls=true&tlsAllowInvalidCertificates=true`;
+
+db = connect(uri);
+
+if (initMode === 'ping') {
+    db.runCommand({ ping: 1 });
+} else if (initFile) {
+    load(initFile);
+}
+EOF
 }
 
 resolve_password
@@ -199,18 +161,12 @@ print_file_and_log() {
 wait_for_documentdb() {
     local max_attempts=30
     local attempt=1
-    local ping_file=""
-
-    create_temp_file ping_file "/tmp/documentdb-mongosh-ping.XXXXXX.js"
-    cat > "$ping_file" <<'EOF'
-db.runCommand({ ping: 1 });
-EOF
     
     echo "Waiting for DocumentDB to be ready at ${DOCUMENTDB_HOST}:${DOCUMENTDB_PORT}..."
     
     while [ $attempt -le $max_attempts ]; do
         if command -v mongosh >/dev/null 2>&1; then
-            if run_mongosh_script "$ping_file" >/dev/null 2>&1; then
+            if run_mongosh_script "" "ping" >/dev/null 2>&1; then
                 echo "DocumentDB is ready!"
                 return 0
             fi
