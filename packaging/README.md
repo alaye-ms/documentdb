@@ -37,7 +37,7 @@ Supported PG versions: 15, 16, 17
 [Optional] Before building RPM packages, you can validate your environment:
 
 ```sh
-./packaging/validate_rpm_build.sh
+./packaging/rpm/validate_rpm_build.sh
 ```
 
 This script checks:

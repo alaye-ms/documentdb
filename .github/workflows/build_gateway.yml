@@ -69,7 +69,7 @@ jobs:
         ls -R downloaded-artifacts
     - name: Build Gateway DEB
       run: |
-        ./packaging/build_gateway_packages.sh --os deb13 --pg 17 --output-dir downloaded-artifacts
+        ./packaging/gateway/build_gateway_packages.sh --os deb13 --pg 17 --output-dir downloaded-artifacts
         ls -R downloaded-artifacts
     - name: Login to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
