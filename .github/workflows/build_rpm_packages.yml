@@ -69,12 +69,10 @@ jobs:
           compression-level: 0
 
       - name: Build Gateway RPM Package
-        if: matrix.pg_version == '17'
         run: |
-          ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg 17 --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
+          ./packaging/gateway/build_gateway_packages.sh --os ${{ matrix.os }} --pg ${{ matrix.pg_version }} --version ${{ env.DOCUMENTDB_VERSION }} --test-clean-install
 
       - name: Upload Gateway RPM Package as Artifact
-        if: matrix.pg_version == '17'
         uses: actions/upload-artifact@v4
         with:
           name: archive-${{ matrix.os }}-${{ matrix.arch }}-documentdb-gateway-${{ env.DOCUMENTDB_VERSION }}
