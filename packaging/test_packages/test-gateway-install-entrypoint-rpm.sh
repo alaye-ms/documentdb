@@ -6,6 +6,7 @@ readonly PASSWORD="DocDbPasswordArgCheck123"
 readonly PG_PORT="9712"
 readonly GATEWAY_PORT="10260"
 readonly SETUP_LOG="/tmp/documentdb-setup.log"
+readonly POSTGRES_VERSION="${POSTGRES_VERSION:-17}"
 TEMP_FILES=()
 
 log() {
@@ -160,6 +161,22 @@ run_psql() {
         -d postgres \
         -X \
         -Atqc "${sql}"
+}
+
+resolve_pg_config() {
+    local candidate="/usr/pgsql-${POSTGRES_VERSION}/bin/pg_config"
+
+    if [[ -x "${candidate}" ]]; then
+        printf '%s' "${candidate}"
+        return 0
+    fi
+
+    if command -v pg_config >/dev/null 2>&1; then
+        command -v pg_config
+        return 0
+    fi
+
+    fail "pg_config was not found for PostgreSQL ${POSTGRES_VERSION}"
 }
 
 password_visible_in_process_args() {
@@ -371,6 +388,7 @@ verify_postgres_state() {
     local preload_libraries
     local hba_file
     local extended_rum_control
+    local pg_config_bin
 
     log "Verifying PostgreSQL settings, HBA, roles, and extensions."
     assert_eq "$(run_psql 'SHOW listen_addresses;')" "localhost" "Unexpected listen_addresses"
@@ -394,7 +412,8 @@ verify_postgres_state() {
     assert_eq "$(run_psql "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'documentdb_core') THEN 'ok' ELSE 'missing' END;")" "ok" "documentdb_core extension missing"
     assert_eq "$(run_psql "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'documentdb') THEN 'ok' ELSE 'missing' END;")" "ok" "documentdb extension missing"
 
-    extended_rum_control="$(pg_config --sharedir)/extension/documentdb_extended_rum.control"
+    pg_config_bin="$(resolve_pg_config)"
+    extended_rum_control="$("${pg_config_bin}" --sharedir)/extension/documentdb_extended_rum.control"
     if [[ -f "${extended_rum_control}" ]]; then
         assert_contains "${preload_libraries}" "pg_documentdb_extended_rum" "shared_preload_libraries missing pg_documentdb_extended_rum"
         assert_eq "$(run_psql 'SHOW documentdb.rum_library_load_option;')" "require_documentdb_extended_rum" "Unexpected documentdb.rum_library_load_option"
