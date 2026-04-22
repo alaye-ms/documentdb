@@ -11,9 +11,11 @@ USERNAME="default_user"
 PASSWORD=""
 INIT_DATA_PATH="/init_doc_db.d"
 VERBOSE="false"
+DOCUMENTDB_HOST="localhost"
 DOCUMENTDB_PORT="10260"
 LOG_FILE="${ENTRYPOINT_LOG:-/var/log/documentdb/gateway_entrypoint.log}"
 LOG_FILE_AVAILABLE="false"
+TEMP_FILES=()
 
 if [ -n "$LOG_FILE" ]; then
     if touch "$LOG_FILE" 2>/dev/null; then
@@ -22,6 +24,36 @@ if [ -n "$LOG_FILE" ]; then
         echo "Warning: Unable to append to log file: $LOG_FILE"
     fi
 fi
+
+cleanup_temp_files() {
+    if [ "${#TEMP_FILES[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    rm -f "${TEMP_FILES[@]}" 2>/dev/null || true
+    TEMP_FILES=()
+}
+trap cleanup_temp_files EXIT
+
+register_temp_file() {
+    TEMP_FILES+=("$1")
+}
+
+create_temp_file() {
+    local target_var="$1"
+    local template="${2:-}"
+    local created_file=""
+
+    if [ -n "$template" ]; then
+        created_file="$(mktemp "$template")"
+    else
+        created_file="$(mktemp)"
+    fi
+
+    chmod 600 "$created_file"
+    register_temp_file "$created_file"
+    printf -v "$target_var" '%s' "$created_file"
+}
 
 # Print usage information
 usage() {
@@ -35,7 +67,8 @@ Options:
   -H, --host HOST              DocumentDB host (default: localhost)
   -P, --port PORT              DocumentDB port (default: 10260)
   -u, --username USERNAME      DocumentDB username (default: default_user)
-  -p, --password PASSWORD      DocumentDB password (required)
+  -p, --password PASSWORD      DocumentDB password
+                               (can also set DOCUMENTDB_PASSWORD env var)
   -d, --data-path PATH         Path to directory containing .js initialization files
                                (default: /init_doc_db.d)
   -v, --verbose                Enable verbose output
@@ -89,11 +122,54 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate required parameters
-if [ -z "$PASSWORD" ]; then
-    echo "Error: Password is required. Use -p or --password to specify the password."
-    exit 1
-fi
+resolve_password() {
+    if [ -z "$PASSWORD" ] && [ -n "${DOCUMENTDB_PASSWORD:-}" ]; then
+        PASSWORD="${DOCUMENTDB_PASSWORD}"
+    fi
+
+    if [ -z "$PASSWORD" ]; then
+        echo "Error: Password is required. Use -p or DOCUMENTDB_PASSWORD."
+        exit 1
+    fi
+}
+
+create_mongosh_wrapper_script() {
+    local target_var="$1"
+    local wrapper_path=""
+
+    create_temp_file wrapper_path "/tmp/documentdb-mongosh.XXXXXX.js"
+    cat > "$wrapper_path" <<'EOF'
+const host = process.env.DOCUMENTDB_HOST || 'localhost';
+const port = process.env.DOCUMENTDB_PORT;
+const username = process.env.DOCUMENTDB_USERNAME;
+const password = process.env.DOCUMENTDB_PASSWORD;
+const initFile = process.env.DOCUMENTDB_INIT_FILE || '';
+const uri = `mongodb://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${port}/admin?authSource=admin&authMechanism=SCRAM-SHA-256&tls=true&tlsAllowInvalidCertificates=true`;
+
+db = connect(uri);
+
+if (initFile) {
+    load(initFile);
+}
+EOF
+
+    printf -v "$target_var" '%s' "$wrapper_path"
+}
+
+run_mongosh_script() {
+    local init_file="$1"
+    local wrapper_file=""
+
+    create_mongosh_wrapper_script wrapper_file
+    DOCUMENTDB_HOST="$DOCUMENTDB_HOST" \
+    DOCUMENTDB_PORT="$DOCUMENTDB_PORT" \
+    DOCUMENTDB_USERNAME="$USERNAME" \
+    DOCUMENTDB_PASSWORD="$PASSWORD" \
+    DOCUMENTDB_INIT_FILE="$init_file" \
+        mongosh --quiet --nodb "$wrapper_file"
+}
+
+resolve_password
 
 # Verbose logging function
 log() {
@@ -123,12 +199,18 @@ print_file_and_log() {
 wait_for_documentdb() {
     local max_attempts=30
     local attempt=1
+    local ping_file=""
+
+    create_temp_file ping_file "/tmp/documentdb-mongosh-ping.XXXXXX.js"
+    cat > "$ping_file" <<'EOF'
+db.runCommand({ ping: 1 });
+EOF
     
-    echo "Waiting for DocumentDB to be ready at localhost:${DOCUMENTDB_PORT}..."
+    echo "Waiting for DocumentDB to be ready at ${DOCUMENTDB_HOST}:${DOCUMENTDB_PORT}..."
     
     while [ $attempt -le $max_attempts ]; do
         if command -v mongosh >/dev/null 2>&1; then
-            if mongosh "localhost:${DOCUMENTDB_PORT}" -u "$USERNAME" -p "$PASSWORD" --authenticationMechanism SCRAM-SHA-256 --tls --tlsAllowInvalidCertificates --eval "db.runCommand({ping: 1})" >/dev/null 2>&1; then
+            if run_mongosh_script "$ping_file" >/dev/null 2>&1; then
                 echo "DocumentDB is ready!"
                 return 0
             fi
@@ -174,7 +256,7 @@ run_init_scripts() {
             print_file_and_log "$init_file"
             print_and_log "---- End init data: $(basename \"$init_file\") ----"
 
-            if mongosh "localhost:${DOCUMENTDB_PORT}" -u "$USERNAME" -p "$PASSWORD" --authenticationMechanism SCRAM-SHA-256 --tls --tlsAllowInvalidCertificates --file "$init_file"; then
+            if run_mongosh_script "$init_file"; then
                 log "Successfully executed: $(basename "$init_file")"
             else
                 echo "Error: Failed to execute: $(basename "$init_file")"
@@ -199,7 +281,7 @@ run_init_scripts() {
 # Main initialization logic
 main() {
     echo "Starting DocumentDB data initialization..."
-    echo "Host: localhost:${DOCUMENTDB_PORT}"
+    echo "Host: ${DOCUMENTDB_HOST}:${DOCUMENTDB_PORT}"
     echo "Username: $USERNAME"
     
     # Wait for DocumentDB to be ready

@@ -488,7 +488,7 @@ if [ -d "$INIT_DATA_PATH" ] && [ "$(ls -A "$INIT_DATA_PATH"/*.js 2>/dev/null)" ]
     init_script="$SCRIPT_DIR/init_documentdb_data.sh"
     if [ -f "$init_script" ]; then
         echo "Using custom initialization data from: $INIT_DATA_PATH"
-        if "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -p "$PASSWORD" -d "$INIT_DATA_PATH" -v; then
+        if DOCUMENTDB_PASSWORD="$PASSWORD" "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -d "$INIT_DATA_PATH" -v; then
             echo "Custom data initialization completed."
             custom_data_initialized=true
         else
@@ -510,7 +510,7 @@ if [ "$SKIP_INIT_DATA" != "true" ]; then
     
     if [ -f "$init_script" ] && [ -d "$sample_data_path" ]; then
         echo "Loading sample data from: $sample_data_path"
-        if "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -p "$PASSWORD" -d "$sample_data_path" -v; then
+        if DOCUMENTDB_PASSWORD="$PASSWORD" "$init_script" -H localhost -P "$DOCUMENTDB_PORT" -u "$USERNAME" -d "$sample_data_path" -v; then
             echo "Sample data initialization completed."
         else
             echo "Error: Sample data initialization failed"

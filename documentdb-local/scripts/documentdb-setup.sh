@@ -1071,7 +1071,7 @@ prepare_existing_cluster() {
 wait_for_postgres() {
     local attempt=""
     for attempt in $(seq 1 60); do
-        if "${PG_ISREADY}" -h localhost -p "${PG_PORT}" >/dev/null 2>&1; then
+        if run_as_user "${PG_OWNER}" "${PSQL}" -p "${PG_PORT}" -d postgres -X -qAt -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then
             log_verbose "PostgreSQL became ready on attempt ${attempt}."
             return 0
         fi
@@ -1244,14 +1244,14 @@ load_sample_data_if_requested() {
     init_args=(
         --port "${GATEWAY_PORT}"
         --username "${USERNAME}"
-        --password "${PASSWORD}"
         --data-path "${SAMPLE_DATA_DIR}"
     )
     if [[ "${VERBOSE}" == "true" ]]; then
         init_args+=(--verbose)
     fi
 
-    "${INIT_DATA_SCRIPT}" "${init_args[@]}"
+    DOCUMENTDB_PASSWORD="${PASSWORD}" \
+        "${INIT_DATA_SCRIPT}" "${init_args[@]}"
 }
 
 print_completion_message() {
