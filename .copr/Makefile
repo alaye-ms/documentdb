@@ -55,10 +55,22 @@ srpm:
 	    https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$(PCRE2_VERSION)/pcre2-$(PCRE2_VERSION).tar.gz
 
 	# ---- Source0: main source tarball ----
+	# The tarball carries everything the spec needs at %install time, including
+	# the gateway runtime files consumed by the documentdb-gateway subpackage:
+	#   documentdb-local/scripts/*        (documentdb-setup, emulator, init, service helper)
+	#   documentdb-local/sample-data/*    (JS sample datasets + README)
+	#   packaging/gateway/systemd/*       (documentdb-gateway / documentdb-postgresql units)
+	#   pg_documentdb_gw/SetupConfiguration.json
+	#   scripts/{utils,start_oss_server,build_and_start_gateway,setup_psqlrc}.sh
+	# Build artifacts are excluded so the SRPM stays lean.
 	tar czf $(SRCDIR)/$(PKG_NAME)-$(VERSION).tar.gz \
 	    --transform 's,^\.,$(PKG_NAME)-$(VERSION),' \
 	    --exclude=.git \
 	    --exclude=rpmbuild \
+	    --exclude='./target' \
+	    --exclude='*/target' \
+	    --exclude='./_vendored' \
+	    --exclude='./pg_documentdb_gw/vendor' \
 	    --exclude=intelrdfpmath-$(INTELMATHLIB_TARVER) \
 	    .
 

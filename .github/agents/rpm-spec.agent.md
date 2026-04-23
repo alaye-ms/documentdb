@@ -59,21 +59,104 @@ See the following for examples of how to structure spec files for PostgreSQL ext
 
 When proposing spec file changes, show the exact `oldString → newString` edits with surrounding context. For reviews, list issues as bullet points with section references (e.g., `%build step 4`).
 
-## Testing 
+## Testing
 
-To test changes, use the fedora:42 docker image like so:
+### Quick SRPM build check
+
+For a fast, non-interactive check that the SRPM builds cleanly in a fresh Fedora
+environment, use the helper script:
+
+```bash
+./packaging/test_copr_srpm.sh [--output-dir DIR]
+```
+
+This replicates the Copr mock chroot flow by running `make -f .copr/Makefile srpm`
+inside a `fedora:latest` container and drops the resulting `.src.rpm` into
+`packaging/` (or `--output-dir`). Prefer this for iterating on spec changes before
+pushing to Copr.
+
+### Interactive / full rebuild
+
+For deeper debugging (e.g. rpmlint, installing the SRPM, inspecting build output),
+use an interactive fedora:42 container:
+
 `docker run --rm -it --name fedora -v ~/.ssh:/root/.ssh:ro fedora:42 bash`
+
 Then copy the files over with
 `docker cp ~/documentdb fedora:/src`
-and run the following in the fedora container
+and run the following in the fedora container:
 ```bash
 dnf install -y rpm-build curl make rpmlint rpmspec
 cd /src
 make -f .copr/Makefile srpm outdir=/output
 ls -lh /output/*.src.rpm
 cd /output
-dnf install -y documentdb-0.111.0-1.fc42.src.rpm 
+dnf install -y documentdb-0.111.0-1.fc42.src.rpm
 ```
 
-Don't mount the source directly into the container, as the RPM generates a lot of files that
-shouldn't be present on the host machine.
+Don't mount the source directly into the container, as the RPM generates a lot of
+files that shouldn't be present on the host machine.
+
+### Per-chroot BuildRequires validation (Copr parity)
+
+After building the SRPM, verify the spec's `BuildRequires` resolve in each target
+Copr chroot. `dnf builddep` only reads the SRPM header stamped at build time, so
+to exercise distro-conditional logic (e.g. `%if 0%{?fedora} >= 43`) re-parse the
+**source spec** in each chroot by mounting it read-only and pointing `builddep`
+at it.
+
+Copr targets and the repos they need:
+
+| Chroot | Image | External repos required |
+|---|---|---|
+| `fedora-43-x86_64` | `fedora:43` | none (native PG 18) |
+| `fedora-42-x86_64` | `fedora:42` | PGDG (`pgdg-fedora-repo-latest`) |
+| `epel-9-x86_64` | `rockylinux:9` | EPEL + CRB + PGDG (`pgdg-redhat-repo-latest`) |
+
+Reusable test snippets (mount the spec as `/x.spec`):
+
+```bash
+SPEC=/home/alaye/documentdb/packaging/rpm/spec/postgres18-documentdb.spec
+
+# fedora-43 (native PG 18)
+docker run --rm -v "$SPEC:/x.spec:ro" fedora:43 bash -c '
+    dnf install -y dnf-plugins-core rpm-build >/dev/null 2>&1
+    dnf builddep -y /x.spec && echo PASS || echo FAIL'
+
+# fedora-42 (PGDG)
+docker run --rm -v "$SPEC:/x.spec:ro" fedora:42 bash -c '
+    dnf install -y dnf-plugins-core rpm-build >/dev/null 2>&1
+    dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/F-42-x86_64/pgdg-fedora-repo-latest.noarch.rpm >/dev/null 2>&1
+    dnf builddep -y --nogpgcheck /x.spec && echo PASS || echo FAIL'
+
+# epel-9 (PGDG + EPEL + CRB)
+docker run --rm -v "$SPEC:/x.spec:ro" rockylinux:9 bash -c '
+    dnf install -y dnf-plugins-core rpm-build epel-release >/dev/null 2>&1
+    dnf config-manager --set-enabled crb >/dev/null
+    dnf -qy module disable postgresql >/dev/null 2>&1 || true
+    dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm >/dev/null 2>&1
+    dnf builddep -y --nogpgcheck /x.spec && echo PASS || echo FAIL'
+```
+
+Notes:
+- Use `--nogpgcheck` on PGDG chroots; local test containers lack the PGDG GPG
+  key material and will otherwise fail with "repository does not have any
+  OpenPGP keys configured". Real Copr builders do have the keys.
+- On `fedora:latest` / `fedora:43` the native package is `postgresql-server-devel`.
+  On PGDG (Fedora and EL) it is `postgresql<NN>-devel` (no `-server-` infix).
+- Check for spec warnings in SRPM build output:
+  `./packaging/test_copr_srpm.sh 2>&1 | grep -iE '^warning:'` — rpmbuild warnings
+  (e.g. "second Description", "Macro expanded in comment", "Possible unexpanded
+  macro") are actionable; unrelated git/cargo warnings can be ignored.
+- The `applied/2.0u3-1` git tag warning from intelrdfpmath tarball creation is
+  benign and expected.
+
+### Copr project configuration
+
+For `fedora-42-x86_64` and `epel-9-x86_64` to build successfully in Copr, add
+PGDG as an **External Repository** in the project settings:
+
+- `https://download.postgresql.org/pub/repos/yum/reporpms/F-$releasever-$basearch/pgdg-fedora-repo-latest.noarch.rpm`
+- `https://download.postgresql.org/pub/repos/yum/reporpms/EL-$releasever-$basearch/pgdg-redhat-repo-latest.noarch.rpm`
+
+EPEL and CRB are enabled automatically on the `epel-9-x86_64` Copr chroot.
