@@ -11,6 +11,12 @@
 %global pgversion 18
 
 %if %?postgresql_default
+%global pkgname %{sname}
+%else
+%global pkgname postgresql%{pgversion}-%{sname}
+%endif
+
+%if %?postgresql_default
 %global pg_config   %{_bindir}/pg_config
 %global pg_libdir   %{_libdir}/pgsql
 %global pg_sharedir %{_datadir}/pgsql
@@ -31,30 +37,36 @@
 # debuginfo support.  Binaries are stripped by the default %%__os_install_post.
 %global debug_package %{nil}
 
-Name:           postgresql%{pgversion}-%{sname}
+Name:           %{pkgname}
 Version:        0.111.0
 Release:        1%{?dist}
 Summary:        Document-oriented NoSQL engine for PostgreSQL
 License:        MIT
 URL:            https://documentdb.io
 Source0:        https://github.com/%{sname}/%{sname}/archive/refs/tags/v%{version}.tar.gz#/%{sname}-%{version}.tar.gz
+# Bundled: libbson (from mongo-c-driver).  The extensions link against
+# libbson-static-1.0 (see Makefile.cflags) to avoid a soname ABI coupling
+# between the extension .so and whatever libbson the user may have
+# installed via other packages.  Fedora's libbson-devel does not ship a
+# static archive, so we must vendor and build our own.
 Source1:        https://github.com/mongodb/mongo-c-driver/releases/download/%{libbson_version}/mongo-c-driver-%{libbson_version}.tar.gz
+# Bundled: Intel Decimal Floating-Point Math Library.  Not packaged in
+# Fedora or EPEL.  Required by pg_documentdb_core for BSON Decimal128
+# arithmetic; linked statically as libbid.a.
 # Generate: git clone --depth 1 -b applied/2.0u3-1 https://git.launchpad.net/ubuntu/+source/intelrdfpmath intelrdfpmath-2.0u3-1 && tar czf intelrdfpmath-2.0u3-1.tar.gz intelrdfpmath-2.0u3-1
 Source2:        intelrdfpmath-%{intelmathlib_version}.tar.gz
+# Gateway Cargo vendor tree (offline Rust build; see %%cargo_prep below).
 # Generate: cd pg_documentdb_gw && cargo vendor && tar czf ../documentdb-gateway-vendor.tar.gz vendor/
 Source3:        documentdb-gateway-vendor.tar.gz
-# Vendored pg_cron source (not in all distro repos; PostgreSQL License)
+# Bundled: pg_cron (PostgreSQL License).  Only used on Fedora native PG,
+# where no pg_cron RPM exists in the distro repos.  PGDG builds get
+# pg_cron_%%{pgversion} from the PGDG repository and don't extract this.
 Source4:        https://github.com/citusdata/pg_cron/archive/refs/tags/v%{pg_cron_version}.tar.gz#/pg_cron-%{pg_cron_version}.tar.gz
-# Vendored pcre2 source (EL9 lacks pcre2-static without CRB)
+# Bundled: PCRE2 (BSD).  Only used on EL9/PGDG, which does not ship
+# pcre2-static (it exists in Fedora and on EL9 only as mingw cross
+# packages).  Fedora builds use the distro pcre2-static instead and do
+# not extract this source.
 Source5:        https://github.com/PCRE2Project/pcre2/releases/download/pcre2-%{pcre2_version}/pcre2-%{pcre2_version}.tar.gz
-
-%if %?postgresql_default
-%global pkgname %{sname}
-%package -n %{pkgname}
-Summary: Document-oriented NoSQL engine for PostgreSQL
-%else
-%global pkgname %name
-%endif
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -73,6 +85,14 @@ BuildRequires: pkgconfig(icu-uc)
 BuildRequires: pkgconfig(icu-i18n)
 BuildRequires: pkgconfig(krb5)
 BuildRequires: pkgconfig(libpcre2-8)
+# pcre2 is linked statically into the extension .so (pg_documentdb_core's
+# Makefile uses `pkg-config --static --libs libpcre2-8`).  pcre2-static
+# is available in Fedora; on EL9/PGDG no x86_64 pcre2-static exists
+# (only mingw cross packages), so we vendor and build PCRE2 from source
+# in that branch instead.
+%if %?postgresql_default
+BuildRequires: pcre2-static
+%endif
 BuildRequires: pkgconfig(openssl)
 BuildRequires: rust
 BuildRequires: cargo
@@ -106,7 +126,7 @@ Provides:       bundled(libbson) = %{libbson_version}
 Provides:       bundled(intelmathlib) = %{intelmathlib_version}
 %if %?postgresql_default
 Provides:       bundled(pg_cron) = %{pg_cron_version}
-%else 
+%else
 Provides:       bundled(pcre2) = %{pcre2_version}
 %endif
 
@@ -116,23 +136,16 @@ It offers a native implementation of document-oriented NoSQL database,
 enabling seamless CRUD operations on BSON data types within a PostgreSQL
 framework.
 
-%if %?postgresql_default
-# On Fedora native builds, %%{pkgname} is a distinct subpackage (%%{sname});
-# on PGDG builds %%{pkgname} == %%{name} so the main %%description above
-# already applies and a second block would be a duplicate.
-%description -n %{pkgname}
-DocumentDB is the open-source engine powering Azure DocumentDB.
-It offers a native implementation of document-oriented NoSQL database,
-enabling seamless CRUD operations on BSON data types within a PostgreSQL
-framework.
-%endif
-
 # ---------------------------------------------------------------------------
 # Subpackage: documentdb-gateway
 # ---------------------------------------------------------------------------
 %package -n documentdb-gateway
 Summary:        MongoDB wire protocol proxy for PostgreSQL
 Requires:       jq
+# The gateway invokes the `openssl` CLI at startup to auto-generate self-signed
+# TLS material when no certificate paths are configured (see docdb_openssl.rs).
+# Without this, gateway startup fails with "Failed to create TLS provider".
+Requires:       openssl
 Requires(pre):  shadow-utils
 %{?systemd_requires}
 BuildRequires:  systemd
@@ -193,22 +206,17 @@ tar xf %{SOURCE2}
 %if %?postgresql_default
 # Native PG: extract vendored pg_cron (not in distro repos)
 tar xf %{SOURCE4}
-%else 
-# PGDG: extract vendored pcre2 (CRB not available in mock)
+%else
+# PGDG: extract vendored pcre2 (no x86_64 pcre2-static on EL9)
 tar xf %{SOURCE5}
 %endif
 
-# Set up Cargo vendored dependencies for the gateway build
+# Set up Cargo vendored dependencies for the gateway build using the
+# Fedora cargo-rpm-macros.  %%cargo_prep -v <dir> writes a .cargo/config.toml
+# that pins the build to the vendored crate tree.
 pushd pg_documentdb_gw
 tar xf %{SOURCE3}
-mkdir -p .cargo
-cat > .cargo/config.toml << 'EOF'
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
-EOF
+%cargo_prep -v vendor
 popd
 
 # Remove internal/ (proprietary pg_documentdb_distributed) from build targets
@@ -231,15 +239,29 @@ fi
 %endif
 
 # ===========================================================================
+# Dynamic BuildRequires: let the Fedora cargo macros derive the Rust
+# dependencies from the vendored crate tree prepared above in %prep.
+%generate_buildrequires
+pushd pg_documentdb_gw >/dev/null
+%cargo_generate_buildrequires
+popd >/dev/null
+
+# ===========================================================================
 %build
 _vendored=$(pwd)/_vendored
 mkdir -p ${_vendored}/lib/pkgconfig
 
 # ---- 1. Build vendored libbson from mongo-c-driver ----
+# The PostgreSQL extensions link libbson statically via the
+# `libbson-static-1.0` pkg-config module (see Makefile.cflags).  We enable
+# the static archive explicitly here and do NOT install the shared .so
+# into %%{_libdir} (it would be dead weight and would clash with Fedora's
+# own libbson package on systems that happen to have it installed).
 mkdir -p mongo-c-driver-%{libbson_version}/build
 pushd mongo-c-driver-%{libbson_version}/build
 %{__cmake} \
     -DENABLE_MONGOC=ON \
+    -DENABLE_STATIC=ON \
     -DMONGOC_ENABLE_ICU=OFF \
     -DENABLE_ICU=OFF \
     -DCMAKE_C_FLAGS="-fPIC -g" \
@@ -270,7 +292,11 @@ Libs: -L\${libdir} -lbid
 EOF
 
 %if !%?postgresql_default
-# ---- 3. Build vendored pcre2 static library (PGDG: avoids pcre2-static dep) ----
+# ---- 3. Build vendored pcre2 static library (PGDG only) ----
+# EL9 has no x86_64 pcre2-static package, so we build PCRE2 from source
+# with -DBUILD_SHARED_LIBS=OFF and let the extension link in libpcre2-8.a
+# via the existing `pkg-config --static --libs libpcre2-8` flow.  Only
+# the 8-bit code unit width is built (matching what PostgreSQL uses).
 mkdir -p pcre2-%{pcre2_version}/build
 pushd pcre2-%{pcre2_version}/build
 %{__cmake} \
@@ -304,9 +330,9 @@ popd
 %endif
 
 # ---- 5. Build gateway binary ----
-cd pg_documentdb_gw
-cargo build --release
-cd ..
+pushd pg_documentdb_gw
+%cargo_build
+popd
 
 # ===========================================================================
 %install
@@ -328,11 +354,13 @@ pushd pg_cron-%{pg_cron_version}
 popd
 %endif
 
-# ---- Bundle vendored libbson shared libraries ----
-mkdir -p %{buildroot}%{_libdir}
-cp    ${_vendored}/lib/libbson-1.0.so.0.0.0   %{buildroot}%{_libdir}/libbson-1.0.so.0.0.0
-cp -P ${_vendored}/lib/libbson-1.0.so.0       %{buildroot}%{_libdir}/libbson-1.0.so.0
-cp -P ${_vendored}/lib/libbson-1.0.so         %{buildroot}%{_libdir}/libbson-1.0.so
+# ---- Bundle vendored libbson ----
+# Only the static archive is linked into the extension .so; nothing at
+# runtime needs the shared library, so we deliberately do NOT ship the
+# libbson-1.0.so* set that the upstream `make install` placed into
+# ${_vendored}/lib.  This keeps the package free of a second libbson
+# soname on disk and avoids OWASP A06 (vulnerable bundled component)
+# exposure for a shared library we'd otherwise have to track for CVEs.
 
 # ---- Bundle Intel Decimal Math Library static lib ----
 mkdir -p %{buildroot}%{_libdir}/intelmathlib/LIBRARY
@@ -340,8 +368,13 @@ cp intelrdfpmath-%{intelmathlib_version}/LIBRARY/libbid.a \
    %{buildroot}%{_libdir}/intelmathlib/LIBRARY/
 
 # ---- Install gateway runtime (binary, setup script, config, systemd, helpers, samples) ----
-install -D -m 0755 pg_documentdb_gw/target/release/documentdb_gateway \
-    %{buildroot}%{_bindir}/documentdb_gateway
+# The gateway crate is one member of a Cargo workspace, so invoke
+# %%cargo_install from the specific crate directory rather than the workspace
+# root.  This installs the `documentdb_gateway` binary into
+# %%{buildroot}%%{_bindir}.
+pushd pg_documentdb_gw/documentdb_gateway
+%cargo_install
+popd
 install -D -m 0755 documentdb-local/scripts/documentdb-setup.sh \
     %{buildroot}%{_bindir}/documentdb-setup
 install -D -m 0644 pg_documentdb_gw/SetupConfiguration.json \
@@ -390,7 +423,6 @@ rm -rf %{buildroot}/usr/src/documentdb/pcre2-%{pcre2_version}
 
 # Ensure extension shared objects are marked as executable ELF files.
 chmod 0755 %{buildroot}%{pg_libdir}/*.so
-chmod 0755 %{buildroot}%{_libdir}/libbson-1.0.so.0.0.0
 
 # ===========================================================================
 %files
@@ -401,9 +433,6 @@ chmod 0755 %{buildroot}%{_libdir}/libbson-1.0.so.0.0.0
 %{pg_sharedir}/extension/*.sql
 /usr/src/documentdb
 %{_libdir}/intelmathlib/LIBRARY/libbid.a
-%{_libdir}/libbson-1.0.so
-%{_libdir}/libbson-1.0.so.0
-%{_libdir}/libbson-1.0.so.0.0.0
 
 %files -n documentdb-gateway
 %license LICENSE NOTICE

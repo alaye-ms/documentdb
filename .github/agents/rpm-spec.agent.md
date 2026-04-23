@@ -8,7 +8,13 @@ You are an RPM packaging specialist. Your job is to help author, review, and deb
 ## Context
 
 The primary spec file is `packaging/rpm/spec/postgres18-documentdb.spec`. It builds:
-- **documentdb** — PostgreSQL extensions (documentdb_core, documentdb, documentdb_extended_rum)
+- **documentdb** / **postgresql18-documentdb** — PostgreSQL extensions
+  (documentdb_core, documentdb, documentdb_extended_rum).  **These are the
+  same package** emitted under the two different naming conventions used by
+  Fedora (unversioned `documentdb`) and EPEL/PGDG (`postgresql18-documentdb`).
+  The spec picks one name per build via the `postgresql_default` conditional;
+  they are never produced or installed together, so file-level overlap
+  between them is not a real "conflict" — it is expected.
 - **documentdb-gateway** — Rust-based MongoDB wire protocol proxy
 - **documentdb-server** — Meta-package pulling in all components
 
@@ -160,3 +166,69 @@ PGDG as an **External Repository** in the project settings:
 - `https://download.postgresql.org/pub/repos/yum/reporpms/EL-$releasever-$basearch/pgdg-redhat-repo-latest.noarch.rpm`
 
 EPEL and CRB are enabled automatically on the `epel-9-x86_64` Copr chroot.
+
+### End-to-end Copr smoke test
+
+`packaging/test_copr_install.sh` enables a Copr repo inside a fresh Fedora or
+Rocky Linux container, installs `documentdb-server`, boots PostgreSQL and the
+gateway via `documentdb-setup`, then runs a mongosh CRUD smoke test against
+the gateway.  Use it to validate published Copr builds without touching the
+host system.
+
+```bash
+# Defaults: --copr xgerman/DocumentDB --chroot fedora-43-x86_64
+./packaging/test_copr_install.sh
+
+# All three supported chroots
+./packaging/test_copr_install.sh --chroot fedora-43-x86_64
+./packaging/test_copr_install.sh --chroot fedora-42-x86_64
+./packaging/test_copr_install.sh --chroot epel-9-x86_64
+```
+
+Flags:
+
+| Flag | Purpose |
+|---|---|
+| `--copr OWNER/PROJECT` | Copr project to enable (default `xgerman/DocumentDB`). |
+| `--chroot CHROOT` | `fedora-43-x86_64` (default), `fedora-42-x86_64`, or `epel-9-x86_64`. |
+| `--image IMAGE` | Override the container image (default inferred from `--chroot`). |
+| `--username NAME` | Application MongoDB user (default `cloudsa`). |
+| `--password PASSWORD` | Password for the user (default `DocDbCoprSmoke!23`). |
+| `--keep-container` | Keep the container after the run for post-mortem inspection. |
+| `--no-local-setup` | Use the RPM-installed `documentdb-setup` as-is (skip the local overlay). |
+
+Behaviour notes:
+
+- By default the script **overlays the local working-copy
+  `documentdb-local/scripts/documentdb-setup.sh` over the one installed by the
+  RPM**, so spec-side setup-script fixes can be validated before the next Copr
+  rebuild.  Pass `--no-local-setup` to exercise the package as published.
+- On Fedora chroots the script installs `postgresql-contrib`, `pgvector`,
+  `postgis`, and `libpq-devel` directly.  These are runtime prerequisites of
+  the extension package; `libpq-devel` additionally supplies `/usr/bin/pg_config`
+  which `documentdb-setup` uses to discover the native Fedora PG layout.
+- `openssl` is installed explicitly on every chroot because the gateway shells
+  out to the `openssl` CLI to auto-generate TLS material on first start
+  (see `pg_documentdb_gw/.../docdb_openssl.rs`).  The spec has been updated to
+  declare this as a `Requires`; the workaround remains useful while earlier
+  Copr builds are still in circulation.
+- On smoke-test failure the script dumps `/var/lib/documentdb/gateway.log`
+  from inside the container so gateway panics are surfaced in the host log.
+
+Logs are written to `/tmp/copr_<chroot>.log` when invoked with redirection
+(see the per-chroot one-liner below).  The full run takes several minutes per
+chroot because it pulls the base image, the Copr packages, and mongosh.
+
+Sequential run covering all three supported chroots and recording results:
+
+```bash
+: > /tmp/copr_results.txt
+for c in fedora-43-x86_64 fedora-42-x86_64 epel-9-x86_64; do
+    ./packaging/test_copr_install.sh --chroot "$c" > "/tmp/copr_${c}.log" 2>&1
+    echo "${c}=$?" >> /tmp/copr_results.txt
+done
+cat /tmp/copr_results.txt
+```
+
+A passing run ends with `Copr install + gateway smoke test PASSED.` and the
+`SMOKE_OK` marker from the mongosh CRUD script.

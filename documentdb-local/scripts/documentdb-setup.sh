@@ -613,6 +613,7 @@ set_postgres_binary_paths() {
     local candidate_paths=(
         "/usr/lib/postgresql/${major_version}/bin"
         "/usr/pgsql-${major_version}/bin"
+        "/usr/bin"
     )
     local candidate=""
 
@@ -645,14 +646,19 @@ detect_postgres_installation() {
         return 0
     fi
 
-    for candidate_path in /usr/lib/postgresql/*/bin /usr/pgsql-*/bin; do
+    for candidate_path in /usr/lib/postgresql/*/bin /usr/pgsql-*/bin /usr/bin; do
         if [[ ! -x "${candidate_path}/pg_config" ]]; then
             continue
         fi
 
         candidate_version="$(basename "$(dirname "${candidate_path}")" | sed 's/^pgsql-//')"
         if [[ ! "${candidate_version}" =~ ^[0-9]+$ ]]; then
-            continue
+            # In case version isn't encoded into the path (/usr/bin)
+            candidate_version="$("${candidate_path}/pg_config" --version 2>/dev/null \
+                | awk '{print $2}' | sed 's/[^0-9].*//')"
+            if [[ ! "${candidate_version}" =~ ^[0-9]+$ ]]; then
+                continue
+            fi
         fi
 
         sharedir="$("${candidate_path}/pg_config" --sharedir)"
