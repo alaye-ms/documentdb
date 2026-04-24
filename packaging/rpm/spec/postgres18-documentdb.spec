@@ -238,13 +238,15 @@ if [ "${RUST_MINOR:-0}" -lt 91 ]; then
 fi
 %endif
 
-# ===========================================================================
-# Dynamic BuildRequires: let the Fedora cargo macros derive the Rust
-# dependencies from the vendored crate tree prepared above in %prep.
-%generate_buildrequires
-pushd pg_documentdb_gw >/dev/null
-%cargo_generate_buildrequires
-popd >/dev/null
+# NOTE: we deliberately do NOT use %%generate_buildrequires /
+# %%cargo_generate_buildrequires here.  The gateway's crate tree is fully
+# vendored by Source3 and wired in via `%%cargo_prep -v vendor` in %prep,
+# so cargo never touches the network at build time.  Emitting dynamic
+# `BuildRequires: crate(...)` lines would force dnf to install the crates
+# from distro repos instead -- that works on Fedora 43 (which has a
+# reasonably complete rust-* set) but fails on EPEL 9, which ships almost
+# no crate RPMs.  See packaging/test_copr_dynamic_br.sh for the local
+# reproducer of that Copr failure mode.
 
 # ===========================================================================
 %build

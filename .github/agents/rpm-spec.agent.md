@@ -157,6 +157,42 @@ Notes:
 - The `applied/2.0u3-1` git tag warning from intelrdfpmath tarball creation is
   benign and expected.
 
+### Per-chroot dynamic BuildRequires reproduction (catches Copr `crate(...)` failures)
+
+`dnf builddep <spec>` and `test_copr_srpm.sh` only exercise the **static**
+BuildRequires from the spec header.  Specs that use `%generate_buildrequires`
++ `%cargo_generate_buildrequires` (Fedora cargo-rpm-macros) emit one
+`BuildRequires: crate(<name>) >= <ver>` line per vendored crate during
+`%prep`, and Copr/mock then tries to install those from the chroot's repos.
+EL9 / EPEL ships almost no `rust-*` crate RPMs, so this step fails with:
+
+    nothing provides requested (crate(bson/default) >= 2.7.0 ...)
+
+To reproduce the same failure locally before pushing to Copr, use:
+
+```bash
+./packaging/test_copr_dynamic_br.sh --chroot epel-9-x86_64
+./packaging/test_copr_dynamic_br.sh --chroot fedora-42-x86_64
+./packaging/test_copr_dynamic_br.sh --chroot fedora-43-x86_64   # default
+```
+
+The script:
+1. Picks up the latest `packaging/documentdb-*.src.rpm` (builds one with
+   `test_copr_srpm.sh` if missing).
+2. Spins up the matching container (rockylinux:9 / fedora:42 / fedora:43)
+   with the same external repos Copr has configured (EPEL + CRB + PGDG for
+   EL9; PGDG for Fedora 42; native for Fedora 43) plus `cargo` and
+   `cargo-rpm-macros` / `rust-packaging`.
+3. Installs the SRPM and runs `rpmbuild -br --nodeps <spec>` to force the
+   dynamic-BuildRequires generator to run, producing
+   `*.buildreqs.nosrc.rpm`.  rpmbuild exits 11 here on success.
+4. Runs `dnf builddep --nogpgcheck` against that nosrc.rpm — this is the
+   exact step Copr fails at and prints the `nothing provides crate(...)`
+   list.
+
+Run this any time the spec uses `%generate_buildrequires` or any time the
+gateway's `Cargo.toml` dependencies change.
+
 ### Copr project configuration
 
 For `fedora-42-x86_64` and `epel-9-x86_64` to build successfully in Copr, add
