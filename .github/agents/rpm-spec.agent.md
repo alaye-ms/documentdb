@@ -193,6 +193,45 @@ The script:
 Run this any time the spec uses `%generate_buildrequires` or any time the
 gateway's `Cargo.toml` dependencies change.
 
+### Per-chroot full rebuild (catches `%install` / `%files` failures)
+
+`test_copr_dynamic_br.sh` stops after `%generate_buildrequires`, so it cannot
+see errors that only surface during `%install` or `%files` processing — for
+example Copr build 10363880 failed with:
+
+    Found '/root/rpmbuild/BUILDROOT/...' in installed files; aborting
+    error: Bad exit status from /var/tmp/rpm-tmp.XXXXXX (%install)
+
+This is `/usr/lib/rpm/check-buildroot` refusing to package any file that
+contains the absolute buildroot path (`%cargo_prep -v vendor` writes one
+into `pg_documentdb_gw/.cargo/config.toml`, which then gets bundled into
+`/usr/src/documentdb/` by `cp -r .`).  Other examples in the same class are
+`File listed twice` and `Installed (but unpackaged) file(s) found`.
+
+To reproduce end-to-end locally:
+
+```bash
+./packaging/test_copr_rebuild.sh --chroot epel-9-x86_64
+./packaging/test_copr_rebuild.sh --chroot fedora-42-x86_64
+./packaging/test_copr_rebuild.sh --chroot fedora-43-x86_64   # default
+```
+
+The script mirrors Copr exactly:
+1. Spins up the matching container (rockylinux:9 / fedora:42 / fedora:43)
+   with the same external repos (EPEL + CRB + PGDG / PGDG / native).
+2. Runs `make -f .copr/Makefile srpm` **inside** the target chroot so
+   `%?postgresql_default` and friends evaluate for that distro and the
+   resulting SRPM's `BuildRequires` match Copr's.
+3. `dnf builddep` the freshly-built SRPM.
+4. `rpmbuild --rebuild --nodeps` — compiles the C extensions, vendored
+   libbson/pcre2/pg_cron, and the Rust gateway, then runs `%install` and
+   the `%files` validation that `check-buildroot` / `check-files` enforce.
+
+Use `--keep` to leave the container alive on failure (then
+`docker exec -it docdb-rebuild-<chroot> bash`).  Each chroot takes several
+minutes because it's a real compile, but it is the only local check that
+catches install-stage errors.
+
 ### Copr project configuration
 
 For `fedora-42-x86_64` and `epel-9-x86_64` to build successfully in Copr, add

@@ -417,6 +417,9 @@ rm -rf %{buildroot}/usr/src/documentdb/mongo-c-driver-%{libbson_version}
 rm -rf %{buildroot}/usr/src/documentdb/intelrdfpmath-%{intelmathlib_version}
 rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/target
 rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/vendor
+# Strip the .cargo/config.toml that %cargo_prep wrote with the absolute
+# buildroot path baked in (e.g. `root = "/root/rpmbuild/BUILDROOT/..."`).
+rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/.cargo
 %if %?postgresql_default
 rm -rf %{buildroot}/usr/src/documentdb/pg_cron-%{pg_cron_version}
 %else
