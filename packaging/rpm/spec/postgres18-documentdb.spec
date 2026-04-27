@@ -404,39 +404,50 @@ for f in documentdb-local/sample-data/*.js documentdb-local/sample-data/README.m
 done
 
 # ---- Bundle source code for make check ----
-mkdir -p %{buildroot}/usr/src/documentdb
-cp -r . %{buildroot}/usr/src/documentdb/
+%global docdb_srcdir %{_datadir}/documentdb/source
+mkdir -p %{buildroot}%{docdb_srcdir}
+cp -r . %{buildroot}%{docdb_srcdir}/
 # Clean up build artifacts and vendored build trees from the source copy
-find %{buildroot}/usr/src/documentdb -name "*.o" -delete
-find %{buildroot}/usr/src/documentdb -name "*.so" -delete
-find %{buildroot}/usr/src/documentdb -name "*.bc" -delete
-rm -rf %{buildroot}/usr/src/documentdb/.git*
-rm -rf %{buildroot}/usr/src/documentdb/build
-rm -rf %{buildroot}/usr/src/documentdb/_vendored
-rm -rf %{buildroot}/usr/src/documentdb/mongo-c-driver-%{libbson_version}
-rm -rf %{buildroot}/usr/src/documentdb/intelrdfpmath-%{intelmathlib_version}
-rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/target
-rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/vendor
+find %{buildroot}%{docdb_srcdir} -name "*.o" -delete
+find %{buildroot}%{docdb_srcdir} -name "*.so" -delete
+find %{buildroot}%{docdb_srcdir} -name "*.bc" -delete
+rm -rf %{buildroot}%{docdb_srcdir}/.git*
+rm -rf %{buildroot}%{docdb_srcdir}/build
+rm -rf %{buildroot}%{docdb_srcdir}/_vendored
+rm -rf %{buildroot}%{docdb_srcdir}/mongo-c-driver-%{libbson_version}
+rm -rf %{buildroot}%{docdb_srcdir}/intelrdfpmath-%{intelmathlib_version}
+rm -rf %{buildroot}%{docdb_srcdir}/pg_documentdb_gw/target
+rm -rf %{buildroot}%{docdb_srcdir}/pg_documentdb_gw/vendor
 # Strip the .cargo/config.toml that %cargo_prep wrote with the absolute
 # buildroot path baked in (e.g. `root = "/root/rpmbuild/BUILDROOT/..."`).
-rm -rf %{buildroot}/usr/src/documentdb/pg_documentdb_gw/.cargo
+rm -rf %{buildroot}%{docdb_srcdir}/pg_documentdb_gw/.cargo
 %if %?postgresql_default
-rm -rf %{buildroot}/usr/src/documentdb/pg_cron-%{pg_cron_version}
+rm -rf %{buildroot}%{docdb_srcdir}/pg_cron-%{pg_cron_version}
 %else
-rm -rf %{buildroot}/usr/src/documentdb/pcre2-%{pcre2_version}
+rm -rf %{buildroot}%{docdb_srcdir}/pcre2-%{pcre2_version}
 %endif
 
 # Ensure extension shared objects are marked as executable ELF files.
 chmod 0755 %{buildroot}%{pg_libdir}/*.so
 
 # ===========================================================================
+# FEDORA GUIDELINE NOTE: %check section is intentionally absent.
+# DocumentDB's regression suite (`make check`) requires
+# a running PostgreSQL cluster, the documentdb extensions to be loaded into
+# shared_preload_libraries, and a working pg_cron + pgvector + postgis stack
+# -- none of which are available in the rpmbuild/mock chroot.  The packaged
+# source tree under %%{_datadir}/documentdb/source lets a downstream operator
+# run the full suite post-install (see documentdb-setup).
 %files
 %license LICENSE NOTICE licenses/
 %doc README.md CHANGELOG.md
 %{pg_libdir}/*.so
 %{pg_sharedir}/extension/*.control
 %{pg_sharedir}/extension/*.sql
-/usr/src/documentdb
+# Both this package and documentdb-gateway own %%{_datadir}/documentdb so
+# installing either one alone leaves no unowned directory.
+%dir %{_datadir}/documentdb
+%{_datadir}/documentdb/source
 %{_libdir}/intelmathlib/LIBRARY/libbid.a
 
 %files -n documentdb-gateway
