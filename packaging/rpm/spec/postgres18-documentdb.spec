@@ -146,6 +146,9 @@ Requires:       jq
 # TLS material when no certificate paths are configured (see docdb_openssl.rs).
 # Without this, gateway startup fails with "Failed to create TLS provider".
 Requires:       openssl
+# Required by Fedora packaging guidelines: packages must rotate their own logs.
+# We ship a logrotate.d drop-in for /var/lib/documentdb/gateway.log.
+Requires:       logrotate
 Requires(pre):  shadow-utils
 %{?systemd_requires}
 BuildRequires:  systemd
@@ -385,6 +388,8 @@ install -D -m 0644 packaging/gateway/systemd/documentdb-postgresql.service \
     %{buildroot}%{_unitdir}/documentdb-postgresql.service
 install -D -m 0644 packaging/gateway/systemd/documentdb-gateway.service \
     %{buildroot}%{_unitdir}/documentdb-gateway.service
+install -D -m 0644 packaging/gateway/logrotate/documentdb-gateway \
+    %{buildroot}%{_sysconfdir}/logrotate.d/documentdb-gateway
 install -D -m 0755 documentdb-local/scripts/documentdb_postgresql_service.sh \
     %{buildroot}%{_datadir}/documentdb/scripts/documentdb_postgresql_service.sh
 install -D -m 0644 scripts/utils.sh \
@@ -458,6 +463,7 @@ chmod 0755 %{buildroot}%{pg_libdir}/*.so
 %config(noreplace) %{_sysconfdir}/documentdb/SetupConfiguration.json
 %{_unitdir}/documentdb-postgresql.service
 %{_unitdir}/documentdb-gateway.service
+%config(noreplace) %{_sysconfdir}/logrotate.d/documentdb-gateway
 %dir %{_datadir}/documentdb
 %dir %{_datadir}/documentdb/scripts
 %{_datadir}/documentdb/scripts/documentdb_postgresql_service.sh
