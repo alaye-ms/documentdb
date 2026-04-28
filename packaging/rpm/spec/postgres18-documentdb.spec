@@ -41,7 +41,7 @@ Name:           %{pkgname}
 Version:        0.111.0
 Release:        1%{?dist}
 Summary:        Document-oriented NoSQL engine for PostgreSQL
-License:        MIT
+License:        MIT AND Apache-2.0 AND BSD-3-Clause AND PostgreSQL
 URL:            https://documentdb.io
 Source0:        https://github.com/%{sname}/%{sname}/archive/refs/tags/v%{version}.tar.gz#/%{sname}-%{version}.tar.gz
 # Bundled: libbson (from mongo-c-driver).  The extensions link against
@@ -456,7 +456,7 @@ chmod 0755 %{buildroot}%{pg_libdir}/*.so
 %{_libdir}/intelmathlib/LIBRARY/libbid.a
 
 %files -n documentdb-gateway
-%license LICENSE NOTICE
+%license LICENSE NOTICE pg_documentdb_gw/licenses
 %{_bindir}/documentdb_gateway
 %{_bindir}/documentdb-setup
 %dir %{_sysconfdir}/documentdb
