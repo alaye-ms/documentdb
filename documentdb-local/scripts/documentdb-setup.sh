@@ -867,11 +867,17 @@ confirm_or_apply() {
 # has_working_systemd comes from documentdb-tools-lib.sh (sourced above).
 
 resolve_gateway_binary() {
-    local packaged_path="/usr/bin/documentdb-gateway"
+    local rpm_packaged_path="/usr/bin/documentdb_gateway"
+    local deb_packaged_path="/usr/bin/documentdb-gateway"
     local repo_path="${REPO_ROOT}/pg_documentdb_gw/target/release-with-symbols/documentdb_gateway"
 
-    if [[ -x "${packaged_path}" ]]; then
-        printf '%s' "${packaged_path}"
+    if [[ -x "${rpm_packaged_path}" ]]; then
+        printf '%s' "${rpm_packaged_path}"
+        return 0
+    fi
+
+    if [[ -x "${deb_packaged_path}" ]]; then
+        printf '%s' "${deb_packaged_path}"
         return 0
     fi
 
@@ -884,11 +890,17 @@ resolve_gateway_binary() {
 }
 
 resolve_config_file() {
-    local packaged_path="/etc/documentdb/gateway/SetupConfiguration.json"
+    local rpm_packaged_path="/etc/documentdb/SetupConfiguration.json"
+    local deb_packaged_path="/etc/documentdb/gateway/SetupConfiguration.json"
     local repo_path="${REPO_ROOT}/pg_documentdb_gw/SetupConfiguration.json"
 
-    if [[ -f "${packaged_path}" ]]; then
-        printf '%s' "${packaged_path}"
+    if [[ -f "${rpm_packaged_path}" ]]; then
+        printf '%s' "${rpm_packaged_path}"
+        return 0
+    fi
+
+    if [[ -f "${deb_packaged_path}" ]]; then
+        printf '%s' "${deb_packaged_path}"
         return 0
     fi
 
@@ -1495,14 +1507,27 @@ capture_gateway_active_state() {
     fi
 }
 
+postgres_major_from_pg_config() {
+    local pg_config_path="$1"
+    local version_line=""
+
+    version_line="$("${pg_config_path}" --version 2>/dev/null || true)"
+    printf '%s\n' "${version_line}" | sed -n 's/^PostgreSQL \([0-9]\+\).*/\1/p'
+}
+
 set_postgres_binary_paths() {
     local major_version="$1"
     local candidate=""
+    local candidate_version=""
 
     # Probe the shared Debian-then-RHEL bindir candidate list so the layout
     # cannot drift from documentdb-tune / documentdb-register-gateway.
     while IFS= read -r candidate; do
         if [[ -x "${candidate}/pg_config" ]]; then
+            candidate_version="$(postgres_major_from_pg_config "${candidate}/pg_config")"
+            if [[ "${candidate_version}" != "${major_version}" ]]; then
+                continue
+            fi
             PG_VERSION="${major_version}"
             PG_BIN_DIR="${candidate}"
             PG_CONFIG="${candidate}/pg_config"
@@ -1526,7 +1551,7 @@ detect_postgres_installation() {
     local has_extension=false
 
     if [[ "${PG_VERSION_EXPLICIT}" == "true" ]]; then
-        set_postgres_binary_paths "${PG_VERSION}" || die "PostgreSQL ${PG_VERSION} not found in standard Debian or RHEL paths."
+        set_postgres_binary_paths "${PG_VERSION}" || die "PostgreSQL ${PG_VERSION} not found in standard Debian, RHEL, or Fedora paths."
         return 0
     fi
 
@@ -1555,7 +1580,10 @@ detect_postgres_installation() {
 
         candidate_version="$(basename "$(dirname "${candidate_path}")" | sed 's/^pgsql-//')"
         if [[ ! "${candidate_version}" =~ ^[0-9]+$ ]]; then
-            continue
+            candidate_version="$(postgres_major_from_pg_config "${candidate_path}/pg_config")"
+            if [[ ! "${candidate_version}" =~ ^[0-9]+$ ]]; then
+                continue
+            fi
         fi
 
         sharedir="$("${candidate_path}/pg_config" --sharedir)"
@@ -1641,6 +1669,7 @@ build_desired_hba_block() {
     # This fallback block is greenfield-only: preflight_validation rejects
     # brownfield adoption when the delegated tools are missing.
     cat <<'EOF'
+local   all   documentdb-local   peer
 local   all   all   peer   map=documentdb-map
 EOF
 }
@@ -2029,8 +2058,8 @@ validate_required_arguments() {
 }
 
 resolve_runtime_paths() {
-    GATEWAY_BINARY="$(resolve_gateway_binary)" || die "Unable to find the gateway binary at /usr/bin/documentdb-gateway or in the repo build output."
-    CONFIG_FILE="$(resolve_config_file)" || die "Unable to find SetupConfiguration.json at /etc/documentdb/gateway/SetupConfiguration.json or in the repo. If you just installed the documentdb-gateway package, try: sudo dpkg --configure -a   (the postinst may have been skipped because an unrelated dependency was missing). Then re-run documentdb-setup."
+    GATEWAY_BINARY="$(resolve_gateway_binary)" || die "Unable to find the gateway binary at /usr/bin/documentdb_gateway, /usr/bin/documentdb-gateway, or in the repo build output."
+    CONFIG_FILE="$(resolve_config_file)" || die "Unable to find SetupConfiguration.json at /etc/documentdb/SetupConfiguration.json, /etc/documentdb/gateway/SetupConfiguration.json, or in the repo. If you just installed the documentdb-gateway package, try: sudo dpkg --configure -a   (the postinst may have been skipped because an unrelated dependency was missing). Then re-run documentdb-setup."
     SAMPLE_DATA_DIR="$(resolve_sample_data_dir)" || true
     INIT_DATA_SCRIPT="$(resolve_init_data_script)" || true
     HAS_WORKING_SYSTEMD=false
@@ -2546,6 +2575,11 @@ _legacy_ensure_pg_ident_map() {
         "documentdb-map   documentdb   +documentdb_readonly_role"
         "documentdb-map   documentdb   +documentdb_readwrite_role"
         "documentdb-map   documentdb   +documentdb_admin_role"
+        "documentdb-map   documentdb-local   documentdb-local"
+        "documentdb-map   documentdb-local   documentdb_bg_worker_role"
+        "documentdb-map   documentdb-local   +documentdb_readonly_role"
+        "documentdb-map   documentdb-local   +documentdb_readwrite_role"
+        "documentdb-map   documentdb-local   +documentdb_admin_role"
         "documentdb-map   documentdb-gateway   documentdb-gateway"
         "documentdb-map   documentdb-gateway   +documentdb_readonly_role"
         "documentdb-map   documentdb-gateway   +documentdb_readwrite_role"
@@ -3423,7 +3457,7 @@ wait_for_gateway_ready() {
     if [[ -n "${running_unit}" ]]; then
         hint="Check logs: journalctl -u ${running_unit} --no-pager -n 20"
     else
-        hint="Check logs at /var/lib/documentdb-gateway/gateway.log"
+        hint="Check logs under /var/lib/documentdb-local/${PG_VERSION}/gateway/ or /var/lib/documentdb-gateway/"
     fi
     die "The gateway did not become ready on localhost:${GATEWAY_PORT} within 60 seconds. ${hint}"
 }
