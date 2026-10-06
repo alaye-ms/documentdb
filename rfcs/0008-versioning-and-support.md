@@ -124,7 +124,9 @@ Support for a release means:
 * Security advisories are published for critical vulnerabilities when applicable.
 * Package builds will be tested for correctness.
 
-Each version will have a support matrix modeled as below
+Each version will try to support all active versions of PostgreSQL. If a version
+will go EOL within the long-term support window of a major version, we will likely
+exclude it. The support per-version will look similar to the below matrix.
 
 | Support level                          | PostgreSQL versions
 |----------------------------------------|--------------------
