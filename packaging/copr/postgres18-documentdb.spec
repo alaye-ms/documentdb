@@ -57,7 +57,7 @@ Source1:        https://github.com/mongodb/mongo-c-driver/releases/download/%{li
 # Generate: git clone --depth 1 -b applied/2.0u3-1 https://git.launchpad.net/ubuntu/+source/intelrdfpmath intelrdfpmath-2.0u3-1 && tar czf intelrdfpmath-2.0u3-1.tar.gz intelrdfpmath-2.0u3-1
 Source2:        intelrdfpmath-%{intelmathlib_version}.tar.gz
 # Gateway Cargo vendor tree (offline Rust build; see %%cargo_prep below).
-# Generate with .copr/Makefile to include Cargo's Git source replacements.
+# Generate with packaging/copr/Makefile to include Cargo's Git source replacements.
 Source3:        documentdb-gateway-vendor.tar.gz
 # Bundled: pg_cron (PostgreSQL License).  Only used on Fedora native PG,
 # where no pg_cron RPM exists in the distro repos.  PGDG builds get
@@ -320,7 +320,7 @@ fi
 # `BuildRequires: crate(...)` lines would force dnf to install the crates
 # from distro repos instead -- that works on Fedora 43 (which has a
 # reasonably complete rust-* set) but fails on EPEL 9, which ships almost
-# no crate RPMs.  See packaging/test_copr_dynamic_br.sh for the local
+# no crate RPMs.  See packaging/copr/test_copr_dynamic_br.sh for the local
 # reproducer of that Copr failure mode.
 
 # ===========================================================================
